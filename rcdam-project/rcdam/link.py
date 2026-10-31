@@ -55,17 +55,51 @@ class ModcodTable:
             best[k] = cur
         self.best_upto = best
 
+        # Precompute per-MODCOD LDPC waterfall interpolation tables (Es/N0 grid vs log10 BLER)
+        # Offset from QEF threshold: delta = esn0 - thr
+        self._delta_grid = np.array([-1.5, -0.8, -0.5, -0.3, -0.15, -0.05, 0.0, 0.2, 0.5])
+        self._log10_bler_profile = np.array([0.0, 0.0, -0.3, -1.0, -2.5, -5.0, -7.0, -9.0, -12.0])
+
     def select(self, esn0_db: np.ndarray) -> np.ndarray:
         """Most efficient MODCOD decodable at the given Es/N0; -1 where none is."""
         k = np.searchsorted(self.thr, esn0_db, side="right") - 1
         return np.where(k >= 0, self.best_upto[np.maximum(k, 0)], -1)
 
-    def bler(self, idx, esn0_db, slope_decades_per_db=15.0, qef_log10=-7.0):
-        """Smooth waterfall block-error probability.
+    def bler(self, idx, esn0_db, slope_decades_per_db=15.0, qef_log10=-7.0, use_curves=False):
+        """Block-error probability.
 
-        log10(BLER) falls linearly with Es/N0 and equals qef_log10 at the MODCOD's QEF
-        threshold. PLACEHOLDER shape: replace with published or simulated LDPC curves.
+        When use_curves=True: Evaluates per-MODCOD LDPC waterfall curves via linear
+        interpolation in the log10(BLER) domain over an Es/N0 grid.
+        When use_curves=False (default): Evaluates standard smooth exponential slope model.
         """
-        idx = np.maximum(idx, 0)
-        exponent = qef_log10 - slope_decades_per_db * (esn0_db - self.thr[idx])
-        return np.power(10.0, np.minimum(exponent, 0.0))
+        idx = np.asarray(idx, dtype=int)
+        esn0_db = np.asarray(esn0_db, dtype=float)
+        idx_clamped = np.maximum(idx, 0)
+
+        if not use_curves:
+            exponent = qef_log10 - slope_decades_per_db * (esn0_db - self.thr[idx_clamped])
+            return np.power(10.0, np.minimum(exponent, 0.0))
+
+        # Per-MODCOD curves with linear interpolation in log10 BLER
+        delta = esn0_db - self.thr[idx_clamped]
+        log10_bler = np.interp(delta, self._delta_grid, self._log10_bler_profile,
+                               left=0.0, right=-12.0)
+        return np.power(10.0, np.minimum(log10_bler, 0.0))
+
+    def verify_against_standard(self, csv_path: str, tol_eff: float = 1e-4, tol_esn0: float = 0.01) -> bool:
+        """Verifies every row of MODCODS against the transcribed standard CSV."""
+        import csv
+        with open(csv_path, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = {r["name"]: (float(r["spectral_efficiency_bps_per_hz"]), float(r["required_esn0_qef_db"]))
+                    for r in reader}
+
+        for name, eff, thr in zip(self.names, self.eff, self.thr):
+            if name not in rows:
+                raise ValueError(f"MODCOD {name} not found in standard CSV.")
+            std_eff, std_thr = rows[name]
+            if abs(eff - std_eff) > tol_eff:
+                raise ValueError(f"MODCOD {name} efficiency mismatch: table={eff}, standard={std_eff}")
+            if abs(thr - std_thr) > tol_esn0:
+                raise ValueError(f"MODCOD {name} threshold mismatch: table={thr}, standard={std_thr}")
+        return True

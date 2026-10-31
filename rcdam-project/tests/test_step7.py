@@ -48,16 +48,24 @@ def test_deep_fade_infeasibility_signalling():
 
 def test_priority_differentiation():
     opt = setup_optimizer()
-    # Moderate fade: attenuation 12.0 dB => Es/N0 = 6.0 dB
+    # At attenuation 5.80 dB (Es/N0 = 12.20 dB), critical priority (eps=0.001 -> target 0.999)
+    # requires a strictly more robust MODCOD (QPSK 9/10, overhead ~1.298) than standard priority
+    # (eps=0.05 -> target 0.95), which can safely use 8PSK 2/3 (overhead ~1.237).
     msg_critical = Message(msg_id=3, bits=10e6, priority=1, deadline_s=3.0)  # eps = 0.001 (target 0.999)
     msg_standard = Message(msg_id=4, bits=10e6, priority=3, deadline_s=3.0)  # eps = 0.05 (target 0.95)
 
-    res_crit = opt.optimize(msg_critical, calibrated_att_db=12.0, clear_sky_esn0_db=18.0)
-    res_std = opt.optimize(msg_standard, calibrated_att_db=12.0, clear_sky_esn0_db=18.0)
+    res_crit = opt.optimize(msg_critical, calibrated_att_db=5.80, clear_sky_esn0_db=18.0)
+    res_std = opt.optimize(msg_standard, calibrated_att_db=5.80, clear_sky_esn0_db=18.0)
 
-    # Standard priority should have equal or lower overhead than critical priority
-    assert res_std.overhead <= res_crit.overhead + 1e-4
-    print(f"Priority test passed: Standard overhead={res_std.overhead:.3f} vs Critical overhead={res_crit.overhead:.3f}")
+    # Standard priority must have strictly lower overhead and use a more efficient MODCOD than critical
+    assert res_crit.overhead > res_std.overhead + 0.02, (
+        f"Critical overhead ({res_crit.overhead:.3f}) must be strictly higher than Standard ({res_std.overhead:.3f})"
+    )
+    assert res_crit.action.modcod < res_std.action.modcod, (
+        f"Critical MODCOD ({res_crit.action.modcod}) must be more robust than Standard ({res_std.action.modcod})"
+    )
+    print(f"Priority test passed: Standard overhead={res_std.overhead:.3f} (modcod {res_std.action.modcod}) "
+          f"< Critical overhead={res_crit.overhead:.3f} (modcod {res_crit.action.modcod})")
 
 
 if __name__ == "__main__":

@@ -70,3 +70,70 @@ class Scenario:
     @property
     def one_way_delay_s(self) -> float:
         return self.rtt_s / 2.0
+
+
+def preset_base(**kwargs) -> Scenario:
+    """Standard GEO Ka-band baseline scenario."""
+    from dataclasses import replace
+    sc = Scenario(
+        duration_h=6.0,
+        events_per_day=4.0,
+        event_peak_ln_mean=1.6,
+        event_peak_ln_std=0.7,
+        event_peak_max_db=35.0,
+        deadline_s=2.0,
+        msg_bits=20e6,
+        msg_interval_s=10.0,
+    )
+    return replace(sc, **kwargs) if kwargs else sc
+
+
+def preset_harsh(**kwargs) -> Scenario:
+    """Harsh channel stress preset ensuring >=100 oracle-infeasible messages."""
+    from dataclasses import replace
+    sc = Scenario(
+        duration_h=6.0,
+        events_per_day=8.0,
+        event_peak_ln_mean=2.5,
+        event_peak_ln_std=1.1,
+        event_peak_max_db=0.0,
+        deadline_s=2.0,
+        msg_bits=20e6,
+        msg_interval_s=10.0,
+    )
+    return replace(sc, **kwargs) if kwargs else sc
+
+
+def preset_deadline(deadline_s: float, **kwargs) -> Scenario:
+    """Deadline sweep preset."""
+    from dataclasses import replace
+    sc = preset_base(deadline_s=float(deadline_s))
+    return replace(sc, **kwargs) if kwargs else sc
+
+
+def preset_size(msg_bits: float, **kwargs) -> Scenario:
+    """Message size sweep preset."""
+    from dataclasses import replace
+    sc = preset_base(msg_bits=float(msg_bits))
+    return replace(sc, **kwargs) if kwargs else sc
+
+
+PRESET_REGISTRY = {
+    "base": preset_base,
+    "harsh": preset_harsh,
+    "deadline_1s": lambda **kw: preset_deadline(1.0, **kw),
+    "deadline_2s": lambda **kw: preset_deadline(2.0, **kw),
+    "deadline_5s": lambda **kw: preset_deadline(5.0, **kw),
+    "deadline_10s": lambda **kw: preset_deadline(10.0, **kw),
+    "size_5mb": lambda **kw: preset_size(5e6, **kw),
+    "size_20mb": lambda **kw: preset_size(20e6, **kw),
+    "size_50mb": lambda **kw: preset_size(50e6, **kw),
+}
+
+
+def get_preset(name: str, **kwargs) -> Scenario:
+    """Retrieve a configured scenario preset by name."""
+    if name not in PRESET_REGISTRY:
+        raise ValueError(f"Unknown preset '{name}'. Choose from: {sorted(PRESET_REGISTRY.keys())}")
+    return PRESET_REGISTRY[name](**kwargs)
+

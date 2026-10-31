@@ -57,6 +57,19 @@ def _rain_gauss_markov(sc: Scenario, rng: np.random.Generator) -> np.ndarray:
     return gate * np.exp(sc.rain_ln_mean + sc.rain_ln_std * intensity)
 
 
+def _rain_itur_p1853(sc: Scenario, rng: np.random.Generator) -> np.ndarray:
+    """ITU-R P.1853 / Maseng-Bakken dynamic synthesis calibrated to ITU-R P.618 statistics."""
+    from .itur import calibrate_maseng_bakken_to_itu_r, EarthStationConfig
+    params = calibrate_maseng_bakken_to_itu_r(EarthStationConfig())
+    n, dt = sc.n_steps, sc.dt_s
+    tau_slow = 1.0 / params["rain_beta_per_s"]
+    occurrence = _ar1(n, tau_slow, dt, rng)
+    intensity = _ar1(n, tau_slow, dt, rng)
+    threshold = norm.isf(params["p_rain"])
+    gate = np.clip((occurrence - threshold) / sc.rain_onset_width, 0.0, 1.0)
+    return gate * np.exp(params["rain_ln_mean"] + params["rain_ln_std"] * intensity)
+
+
 def generate_attenuation_db(sc: Scenario) -> np.ndarray:
     rng = np.random.default_rng(sc.seed)
     n, dt = sc.n_steps, sc.dt_s
@@ -64,6 +77,8 @@ def generate_attenuation_db(sc: Scenario) -> np.ndarray:
         rain_db = _rain_events(sc, rng)
     elif sc.rain_model == "gauss_markov":
         rain_db = _rain_gauss_markov(sc, rng)
+    elif sc.rain_model in ("itur_p1853", "itur"):
+        rain_db = _rain_itur_p1853(sc, rng)
     else:
         raise ValueError(f"unknown rain_model: {sc.rain_model}")
 

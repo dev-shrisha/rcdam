@@ -57,8 +57,12 @@ def evaluate(idx, esn0, sc: Scenario, table: ModcodTable):
 
 
 def run_seed(args):
-    seed, hours = args
+    seed, hours = args[0], args[1]
+    deadline_s = args[2] if len(args) > 2 else None
     sc = replace(step2_scenario(), seed=seed, duration_h=hours)
+    if deadline_s is not None:
+        # make sure the ARQ round limit never binds for long deadlines
+        sc = replace(sc, deadline_s=deadline_s, arq_max_rounds=int(deadline_s / sc.rtt_s) + 4)
     table = ModcodTable()
     att = generate_attenuation_db(sc)
     esn0 = sc.clear_sky_esn0_db - att
