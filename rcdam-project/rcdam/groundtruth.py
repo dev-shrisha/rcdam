@@ -64,6 +64,8 @@ def simulate_true_delivery(action: Optional[Action],
     modcod = action.modcod
     eff = table.eff[modcod]
     frame_s = FRAME_BITS / (sc.symbol_rate_baud * eff)
+    dup = max(1, int(action.dup))
+    interleave_s = max(0.0, float(action.interleave_s))
 
     t0_s = t_start_idx * sc.dt_s
     deadline_timestamp = t0_s + msg.deadline_s
@@ -83,20 +85,25 @@ def simulate_true_delivery(action: Optional[Action],
             break
 
         round_successful = 0
-        for j in range(send_count):
-            t_frame = t_cur + j * frame_s
-            idx = int(np.clip(round(t_frame / sc.dt_s), 0, n_steps - 1))
-            channel_att = att[idx]
-            esn0 = sc.clear_sky_esn0_db + action.power_db - channel_att
-            p_loss = float(table.bler([modcod], [esn0], use_curves=True)[0])
+        total_round_pkts = send_count * dup
+        round_duration = max(total_round_pkts * frame_s, interleave_s)
+        time_step = round_duration / max(1, total_round_pkts)
 
-            # Bernoulli trial
-            lost = rng.random() < p_loss
-            if not lost:
+        for j in range(send_count):
+            frame_got = False
+            for d in range(dup):
+                pkt_k = j * dup + d
+                t_frame = t_cur + pkt_k * time_step
+                idx = int(np.clip(round(t_frame / sc.dt_s), 0, n_steps - 1))
+                channel_att = att[idx]
+                esn0 = sc.clear_sky_esn0_db + action.power_db - channel_att
+                p_loss = float(table.bler([modcod], [esn0], use_curves=True)[0])
+                if rng.random() >= p_loss:
+                    frame_got = True
+            if frame_got:
                 round_successful += 1
 
-        total_frames_sent += send_count
-        round_duration = send_count * frame_s
+        total_frames_sent += total_round_pkts
         round_arrival_at_rx = t_cur + round_duration + sc.one_way_delay_s
 
         need = max(0, need - round_successful)

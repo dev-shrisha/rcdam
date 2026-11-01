@@ -1,0 +1,9 @@
+variant,total_messages,ok,flagged_unrecoverable,flagged_avoidable,silent_unrecoverable,bound_violation,model_mismatch
+Oracle,43081,40257,2822,0,0,2,0
+V0_Static,43081,39714,0,0,2844,441,82
+V1_Margin,43081,39595,0,0,2842,488,156
+V2_Predictive,43081,39664,0,0,2841,454,122
+V3_Quantile_Raw,43081,39160,0,0,2843,912,166
+V4_Conformal_MODCOD,43081,39083,0,0,2843,977,178
+V5_All_Levers,43081,38042,0,0,2821,2198,20
+V6_RC_DAM_Full,43081,38038,2633,788,189,1433,0

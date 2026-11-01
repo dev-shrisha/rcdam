@@ -1,0 +1,6 @@
+bin_range,n_messages,predicted_p_star_mean,empirical_delivery_rate,wilson_lo,wilson_hi,well_calibrated
+"[0.900, 0.950)",0,0.925,nan,nan,nan,nan
+"[0.950, 0.980)",0,0.965,nan,nan,nan,nan
+"[0.980, 0.990)",0,0.985,nan,nan,nan,nan
+"[0.990, 0.995)",1,0.993,0.0,0.0,0.7935,False
+"[0.995, 1.000)",346,0.999,0.9162,0.8822,0.941,False

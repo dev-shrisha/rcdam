@@ -8,8 +8,9 @@ Implements RCDAM_Build_Guide.md Section 3, Section 4.5 & Milestone M4:
 - Full backward compatibility for RedundancyOptimizer and OptimizationResult
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 import numpy as np
+import hashlib
 
 from .evaluator import p_deliver_by_deadline
 from .link import ModcodTable
@@ -75,7 +76,7 @@ class Message:
             object.__setattr__(self, "bits", float(self.size_bits))
 
         # Handle numeric priority for legacy tests (1: critical, 2: high/normal, 3: standard)
-        if isinstance(self.priority, int):
+        if isinstance(self.priority, int) and self.eps == 0.01:
             if self.priority == 1:
                 object.__setattr__(self, "eps", 0.001)
             elif self.priority == 2:
@@ -101,6 +102,7 @@ class Decision:
     p_lower_bound: float   # p_link - alpha when feasible; P* (clamped at 0) when infeasible
     overhead: float
     reason: str            # "ok" | "capacity" | "deadline" | "eps_too_strict" | "no_calibration_data"
+    decision_log: Optional[Dict[str, Any]] = None
 
 
 def evaluate_action(a: Action,
@@ -114,16 +116,21 @@ def evaluate_action(a: Action,
                     one_way_s: float,
                     n_mc: int = 2000,
                     power_cost_per_db: float = 0.03,
-                    seed: int = 0) -> Tuple[float, float]:
+                    seed: int = 0,
+                    header_bytes: int = 40) -> Tuple[float, float]:
     """Evaluates delivery probability and airtime overhead for a candidate action."""
     K = int(np.ceil(msg_bits / FRAME_BITS))
     parity = int(np.ceil(a.parity_frac * K))
     esn0 = clear_esn0_db + a.power_db - z_hat_db
     p = float(table.bler(np.array([a.modcod]), np.array([esn0]))[0])
     frame_s = FRAME_BITS / (symbol_rate * table.eff[a.modcod])
-    p_ok, sent = p_deliver_by_deadline(K, parity, p, frame_s, rtt_s, one_way_s, a.defer_s, deadline_s, n_mc=n_mc, seed=seed)
+    p_ok, sent = p_deliver_by_deadline(
+        K, parity, p, frame_s, rtt_s, one_way_s, a.defer_s, deadline_s,
+        n_mc=n_mc, seed=seed, interleave_s=a.interleave_s, dup=a.dup
+    )
     ref_airtime = msg_bits / (symbol_rate * table.eff.max())
-    overhead = sent * frame_s / ref_airtime + power_cost_per_db * a.power_db
+    header_factor = (1460.0 + header_bytes) / 1500.0
+    overhead = (sent * frame_s / ref_airtime) * header_factor + power_cost_per_db * a.power_db
     return p_ok, overhead
 
 
@@ -140,8 +147,11 @@ def choose_action(z_hat_by_alpha: Dict[float, float],
                   powers: Tuple[float, ...] = (0.0, 1.0, 2.0),
                   parities: Tuple[float, ...] = (0.0, 0.05, 0.15, 0.3),
                   defers: Tuple[float, ...] = (0.0, 0.5, 1.0),
+                  interleaves: Tuple[float, ...] = (0.0,),
+                  dups: Tuple[int, ...] = (1,),
                   n_mc: int = 2000,
-                  use_validated_selection: bool = False) -> Tuple[Optional[Action], float, float, float, bool]:
+                  use_validated_selection: bool = False,
+                  header_bytes: int = 40, seed: int = 0, extra_defer_s: float = 0.0) -> Tuple[Optional[Action], float, float, float, bool]:
     """Joint deadline-constrained optimization over action candidates and alpha confidence levels.
 
     Parameters
@@ -172,84 +182,158 @@ def choose_action(z_hat_by_alpha: Dict[float, float],
     is_multi_horizon = len(z_hat_by_alpha) > 0 and isinstance(next(iter(z_hat_by_alpha.keys())), (int, np.integer))
     grid_horizons = sorted(z_hat_by_alpha.keys()) if is_multi_horizon else None
     K_msg = int(np.ceil(msg_bits / FRAME_BITS))
+    ref_airtime = msg_bits / (symbol_rate * table.eff.max())
     d_steps = int(round(rtt_s / 0.1))
 
-    # Evaluation cache by (modcod, power_db, parity_frac, defer_s, round(z, 2))
+    # Minimum attenuation across all horizons/alphas (most optimistic channel)
+    if is_multi_horizon:
+        z_min = min(min(zd.values()) for zd in z_hat_by_alpha.values())
+    else:
+        z_min = min(z_hat_by_alpha.values())
+    max_pw = max(powers) if powers else 0.0
+
+    # Fast BLER cache
+    bler_cache = {}
+    def get_bler(m_idx: int, esn0_val: float) -> float:
+        k_b = (m_idx, round(esn0_val, 2))
+        if k_b not in bler_cache:
+            bler_cache[k_b] = float(table.bler(np.array([m_idx]), np.array([esn0_val]))[0])
+        return bler_cache[k_b]
+
+    # Evaluation cache by (modcod, power_db, parity_frac, defer_s, interleave_s, dup, round(z, 2))
     cache = {}
 
     # Collect all feasible candidates for validated selection
     feasible_candidates = []  # list of (overhead, action, alpha, p_lb, z)
 
-    for m in mod_candidates:
+    # Sort MODCODs by efficiency descending (cheapest airtime first)
+    sorted_mod_cands = sorted(mod_candidates, key=lambda idx: table.eff[idx], reverse=True)
+
+    for m in sorted_mod_cands:
         frame_s = FRAME_BITS / (symbol_rate * table.eff[m])
-        for pw in powers:
-            for pr in parities:
-                span_s = int(np.ceil(K_msg * (1.0 + pr))) * frame_s + one_way_s
-                for df in defers:
-                    if df + min_tx_s > deadline_s:
+        min_mod_ov = (K_msg * frame_s) / ref_airtime
+        if best_feasible is not None and min_mod_ov >= best_feasible[2]:
+            # Any lower MODCOD will have even higher overhead; can stop searching lower MODCODs
+            break
+
+        # Early prune: if with max power and lowest attenuation, BLER is >= 0.999, this MODCOD cannot work
+        if get_bler(m, clear_esn0_db + max_pw - z_min) >= 0.999:
+            continue
+
+        for pw in sorted(powers):
+            # If base overhead already exceeds best feasible, break out of higher powers
+            if best_feasible is not None and min_mod_ov + 0.03 * pw >= best_feasible[2]:
+                break
+
+            # If for this specific power and lowest attenuation, BLER is >= 0.999, skip
+            if get_bler(m, clear_esn0_db + pw - z_min) >= 0.999:
+                continue
+
+            for pr in sorted(parities):
+                for dp in sorted(dups):
+                    # Duplication >= 2 doubles frames; cannot beat a feasible dup=1 action
+                    if dp > 1 and best_feasible is not None and best_feasible[2] < 1.8:
                         continue
-                    
-                    if is_multi_horizon:
-                        needed_steps = horizon_steps_needed(d_steps, df, span_s, dt=0.1)
-                        h_pick = pick_horizon(grid_horizons, needed_steps)
-                        if h_pick is None:
-                            # Required horizon exceeds calibrated grid -> action not covered
+
+                    for intlv in sorted(interleaves):
+                        # Under constant-p bound, interleaving > 0 only increases span
+                        if intlv > 0.0 and best_feasible is not None:
                             continue
-                        z_dict = z_hat_by_alpha[h_pick]
-                    else:
-                        z_dict = z_hat_by_alpha
 
-                    sorted_alphas = sorted(z_dict.keys())
-                    a = Action(m, pw, pr, df)
-                    for alpha in sorted_alphas:
-                        z = z_dict[alpha]
-                        cache_key = (m, pw, pr, df, round(z, 2))
-                        if cache_key in cache:
-                            p_ok, ov = cache[cache_key]
-                        else:
-                            p_ok, ov = evaluate_action(
-                                a, z, msg_bits, deadline_s, table, clear_esn0_db,
-                                symbol_rate, rtt_s, one_way_s, n_mc=n_mc
-                            )
-                            cache[cache_key] = (p_ok, ov)
+                        total_first_pkts = int(np.ceil(K_msg * (1.0 + pr))) * dp
+                        span_s = max(total_first_pkts * frame_s, intlv) + one_way_s
 
-                        p_lb = p_ok - alpha
-                        if p_lb > best_any[3]:
-                            best_any = (a, alpha, ov, p_lb)
-                        if p_lb >= 1.0 - eps_p and (best_feasible is None or ov < best_feasible[2]):
-                            best_feasible = (a, alpha, ov, p_lb)
-                            if use_validated_selection:
-                                feasible_candidates.append((ov, a, alpha, p_lb, z))
+                        for df in defers:
+                            if df + min_tx_s > deadline_s:
+                                continue
+
+                            if is_multi_horizon:
+                                needed_steps = horizon_steps_needed(
+                                    d_steps, df + extra_defer_s, span_s, dt=0.1
+                                )
+                                h_pick = pick_horizon(grid_horizons, needed_steps)
+                                if h_pick is None:
+                                    continue
+                                z_dict = z_hat_by_alpha[h_pick]
+                            else:
+                                z_dict = z_hat_by_alpha
+
+                            sorted_alphas = sorted(z_dict.keys())
+                            a = Action(m, pw, pr, df, interleave_s=intlv, dup=dp)
+
+                            for alpha in sorted_alphas:
+                                z = z_dict[alpha]
+                                # Quick check: if BLER at this specific z is >= 0.999 and no duplication can rescue it
+                                if get_bler(m, clear_esn0_db + pw - z) >= 0.999 and dp == 1:
+                                    continue
+
+                                cache_key = (m, pw, pr, df, intlv, dp, round(z, 2))
+                                if cache_key in cache:
+                                    p_ok, ov = cache[cache_key]
+                                else:
+                                    p_ok, ov = evaluate_action(
+                                        a, z, msg_bits, deadline_s, table, clear_esn0_db,
+                                        symbol_rate, rtt_s, one_way_s, n_mc=n_mc,
+                                        seed=seed, header_bytes=header_bytes
+                                    )
+                                    cache[cache_key] = (p_ok, ov)
+
+                                p_lb = p_ok - alpha
+                                if p_lb > best_any[3]:
+                                    best_any = (a, alpha, ov, p_lb)
+                                if p_lb >= 1.0 - eps_p and (best_feasible is None or ov < best_feasible[2]):
+                                    best_feasible = (a, alpha, ov, p_lb)
+                                    if use_validated_selection:
+                                        feasible_candidates.append((ov, a, alpha, p_lb, z))
 
     if best_feasible is not None:
         if use_validated_selection and len(feasible_candidates) > 0:
-            # Sort by overhead (cheapest first) and apply optimizer's-curse guard
             feasible_candidates.sort(key=lambda x: x[0])
             target_p = 1.0 - eps_p
+            # A Wilson lower bound can never equal 1.0, so candidates that
+            # spend the entire reliability budget on calibration uncertainty
+            # cannot be independently certified.
+            certifiable_candidates = [
+                cand for cand in feasible_candidates
+                if target_p + cand[2] < 1.0
+            ]
 
             def p_select_fn(cand):
-                return cand[3]  # p_lb from selection phase
+                return cand[3]
 
             def p_verify_fn(cand):
-                # Independent verification draws for the candidate action
                 a_cand, alpha_cand, z = cand[1], cand[2], cand[4]
-                # Defect 1.2 fix: Use independent seed and n_verify >= 3000
-                n_verify = max(n_mc, 3000)
-                verify_seed = int((hash((a_cand.modcod, a_cand.power_db, a_cand.parity_frac, a_cand.defer_s, round(z, 2))) + 777777) % 2147483647)
+                # Critical targets need thousands of independent trials. The
+                # cap is explicit: if the bound cannot be certified, return
+                # INFEASIBLE rather than silently weakening the confidence rule.
+                n_verify = min(10000, max(1000, int(np.ceil(6.0 / max(eps_p, 1e-6)))))
+                seed_material = (
+                    f"{seed}|{a_cand.modcod}|{a_cand.power_db}|{a_cand.parity_frac}|"
+                    f"{a_cand.defer_s}|{a_cand.interleave_s}|{a_cand.dup}|"
+                    f"{round(z, 5)}|{msg_bits}|{deadline_s}|{eps_p}"
+                ).encode("utf-8")
+                verify_seed = int.from_bytes(
+                    hashlib.sha256(seed_material).digest()[:4], "big"
+                )
                 p_v, _ = evaluate_action(
                     a_cand, z, msg_bits, deadline_s, table, clear_esn0_db,
-                    symbol_rate, rtt_s, one_way_s, n_mc=n_verify, seed=verify_seed
+                    symbol_rate, rtt_s, one_way_s, n_mc=n_verify,
+                    seed=verify_seed, header_bytes=header_bytes
                 )
                 k_success = int(round(p_v * n_verify))
                 return k_success, n_verify
 
-            validated = select_validated(feasible_candidates, p_select_fn, p_verify_fn, target_p)
+            # Verification is performed on the single lowest-cost candidate
+            # selected using the separate selection sample. This avoids
+            # uncorrected repeated 95% tests across many candidates.
+            validated = select_validated(
+                certifiable_candidates[:1], p_select_fn, p_verify_fn, target_p,
+                target_for_candidate=lambda cand: target_p + cand[2]
+            )
             if validated is not None:
                 ov_v, a_v, alpha_v, plb_v, _ = validated
                 return a_v, alpha_v, ov_v, plb_v, True
             else:
-                # Defect 1.2 fix: Never fall back silently to the unvalidated best!
-                # If no candidate validates under independent draws, return INFEASIBLE.
                 a_b, alpha_b, ov_b, plb_b = best_any
                 if a_b is None:
                     a_b = Action(modcod=0, power_db=max(powers), parity_frac=max(parities), defer_s=0.0)
@@ -263,7 +347,7 @@ def choose_action(z_hat_by_alpha: Dict[float, float],
     a, alpha, ov, p_lb = best_any
     if a is None:
         a = Action(modcod=0, power_db=max(powers), parity_frac=max(parities), defer_s=0.0)
-        alpha = sorted_alphas[0]
+        alpha = sorted_alphas[0] if 'sorted_alphas' in locals() else 1.0
         ov = 1.0
         p_lb = 0.0
     return a, alpha, ov, max(p_lb, 0.0), False
@@ -277,8 +361,11 @@ def choose_decision(z_hat_by_alpha: Dict[float, float],
                     rtt_s: float,
                     one_way_s: float,
                     mod_candidates: Optional[List[int]] = None,
+                    interleaves: Tuple[float, ...] = (0.0,),
+                    dups: Tuple[int, ...] = (1,),
                     n_mc: int = 500,
-                    use_validated_selection: bool = False) -> Decision:
+                    use_validated_selection: bool = False,
+                    header_bytes: int = 40, seed: Optional[int] = None, extra_defer_s: float = 0.0) -> Decision:
     """Wrapper returning structured Decision dataclass with exact reason."""
     if len(z_hat_by_alpha) == 0:
         return Decision(None, False, 1.0, 0.0, float("inf"), reason="no_calibration_data")
@@ -303,10 +390,16 @@ def choose_decision(z_hat_by_alpha: Dict[float, float],
         if len(mod_candidates) == 0:
             mod_candidates = [0]
 
+    if seed is None:
+        seed = int(msg.arrival_idx) % 2147483647
+
     a, alpha, ov, plb, feas = choose_action(
         z_hat_by_alpha, msg.size_bits, msg.deadline_s, msg.eps, table,
         clear_esn0_db, symbol_rate, rtt_s, one_way_s, mod_candidates,
-        n_mc=n_mc, use_validated_selection=use_validated_selection
+        interleaves=interleaves, dups=dups,
+        n_mc=n_mc, use_validated_selection=use_validated_selection,
+        header_bytes=header_bytes, seed=seed,
+        extra_defer_s=extra_defer_s
     )
 
     if feas:
@@ -365,15 +458,22 @@ class RedundancyOptimizer:
         powers = (0.0, 1.0, 2.0, 3.0) if self.allow_power else (0.0,)
         parities = (0.0, 0.05, 0.15, 0.3) if self.allow_erasure else (0.0,)
         defers = (0.0, 0.5, 1.0) if self.allow_deferral else (0.0,)
+        interleaves = (0.0, 0.5, 1.0) if self.allow_interleaving else (0.0,)
+        dups = (1, 2) if self.allow_duplication else (1,)
+        header_bytes = getattr(self.erasure, 'header_bytes', 40) if self.erasure else 40
 
         a, alpha, ov, plb, feas = choose_action(
             z_dict, msg.size_bits, msg.deadline_s, msg.eps, self.table,
             clear_sky_esn0_db, symbol_rate, rtt_s, one_way_s, cands,
-            powers=powers, parities=parities, defers=defers, n_mc=1000
+            powers=powers, parities=parities, defers=defers,
+            interleaves=interleaves, dups=dups, n_mc=200,
+            header_bytes=header_bytes
         )
 
-        status = f"FEASIBLE: P={plb:.4f} >= {msg.target_delivery_prob:.4f}, Overhead={ov:.3f}" if feas else \
-                 f"INFEASIBLE: Best P={plb:.4f} < {msg.target_delivery_prob:.4f}"
+        status = (
+            f"FEASIBLE: P={plb:.4f} >= {msg.target_delivery_prob:.4f}, Overhead={ov:.3f}"
+            if feas else f"INFEASIBLE: Best P={plb:.4f} < {msg.target_delivery_prob:.4f}"
+        )
 
         return OptimizationResult(
             is_feasible=feas,
