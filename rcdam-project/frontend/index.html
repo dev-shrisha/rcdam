@@ -55,6 +55,13 @@ pre{background:#f0f4f4;padding:10px;border-radius:4px;overflow:auto;font-size:12
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px}
 .right>section:first-child{min-height:120px}
 @media(prefers-reduced-motion:no-preference){.verdict{animation:in .25s ease-out}@keyframes in{from{opacity:0;transform:translateY(4px)}}}
+.sweepbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;align-items:end}
+.sweepbar label{margin:0 0 4px}
+.sweepbar button{width:100%}
+.tablewrap{max-height:260px;overflow:auto;margin-top:10px}
+.tablewrap th,.tablewrap td{width:auto;padding:5px 10px 5px 0}
+.tablewrap th{position:sticky;top:0;background:var(--panel)}
+.sub{font-weight:600;font-size:13px;margin:16px 0 2px}
 </style>
 </head>
 <body>
@@ -116,6 +123,21 @@ pre{background:#f0f4f4;padding:10px;border-radius:4px;overflow:auto;font-size:12
     <section>
       <h2>Fade forecast for the next few seconds</h2>
       <div id="chartBox"><p class="hint">Appears with the decision.</p></div>
+    </section>
+    <section>
+      <h2>Sweep one value and plot the result</h2>
+      <p class="hint">Everything else comes from the form on the left. Pick the value to vary and a range.</p>
+      <div class="sweepbar">
+        <div><label for="sv">Vary</label>
+          <select id="sv"><option value="att">Attenuation (dB)</option><option value="deadline">Deadline (s)</option><option value="size">Message size (Mbit)</option><option value="eps">Miss rate ε</option></select></div>
+        <div><label for="sfrom">From</label><input id="sfrom" type="number" step="any"></div>
+        <div><label for="sto">To</label><input id="sto" type="number" step="any"></div>
+        <div><label for="ssteps">Points</label><input id="ssteps" type="number" min="2" max="60" value="20"></div>
+        <div><button type="button" id="sweepGo">Run sweep</button></div>
+      </div>
+      <p class="err" id="sweepErr" role="alert" hidden></p>
+      <p class="hint" id="sweepProg"></p>
+      <div id="sweepOut"></div>
     </section>
   </div>
 </main>
@@ -254,6 +276,97 @@ $("form").addEventListener("submit", async ev => {
     $("err").textContent = e.message; $("err").hidden = false;
   } finally { $("go").disabled = false; }
 });
+
+/* ---------- sweep ---------- */
+const SV = {
+  att: {label: "Attenuation (dB)", from: 0, to: 15, fmt: v => v.toFixed(1)},
+  deadline: {label: "Deadline (s)", from: 1, to: 20, fmt: v => v.toFixed(1)},
+  size: {label: "Message size (Mbit)", from: 1, to: 100, fmt: v => v.toFixed(1)},
+  eps: {label: "Miss rate ε", from: 0.01, to: 0.1, fmt: v => v.toFixed(3)}
+};
+function sweepDefaults() { const d = SV[$("sv").value]; $("sfrom").value = d.from; $("sto").value = d.to; }
+$("sv").onchange = sweepDefaults; sweepDefaults();
+
+let sweepRows = [];
+
+function lineChart(box, title, xs, lines, pts, xLabel, yLabel, yFixed) {
+  const W = 640, H = 280, L = 52, R = 14, T = 14, B = 44;
+  const vals = [];
+  lines.forEach(l => l.ys.forEach(v => v != null && vals.push(v)));
+  if (!vals.length) { box.innerHTML = `<p class="sub">${title}</p><p class="hint">No certified points in this range, so there is nothing to plot.</p>`; return; }
+  let lo = yFixed ? yFixed[0] : Math.min(...vals), hi = yFixed ? yFixed[1] : Math.max(...vals);
+  if (hi - lo < 1e-9) { lo -= 0.5; hi += 0.5; }
+  const pad = yFixed ? 0 : (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const x = v => L + (v - x0) / ((x1 - x0) || 1) * (W - L - R);
+  const y = v => T + (hi - v) / ((hi - lo) || 1) * (H - T - B);
+  let g = "";
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4; g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="#d9e2e2"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v.toFixed(Math.abs(hi - lo) < 5 ? 2 : 0)}</text>`; }
+  for (let i = 0; i <= 5; i++) { const v = x0 + (x1 - x0) * i / 5; g += `<text x="${x(v)}" y="${H - 24}" text-anchor="middle">${v.toFixed(Math.abs(x1 - x0) < 1 ? 3 : 1)}</text>`; }
+  g += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">${xLabel}</text>`;
+  g += `<text transform="rotate(-90 14 ${(T + H - B) / 2})" x="14" y="${(T + H - B) / 2}" text-anchor="middle">${yLabel}</text>`;
+  lines.forEach(l => {
+    let seg = [];
+    const flush = () => { if (seg.length > 1) g += `<polyline fill="none" stroke="${l.color}" stroke-width="2.2" ${l.dash ? 'stroke-dasharray="6 4"' : ""} points="${seg.join(" ")}"/>`; seg = []; };
+    l.ys.forEach((v, i) => { if (v == null) flush(); else seg.push(x(xs[i]) + "," + y(v)); });
+    flush();
+  });
+  if (pts) pts.forEach((f, i) => { if (f.y != null) g += `<circle cx="${x(xs[i])}" cy="${y(f.y)}" r="4" fill="${f.ok ? "#1f7a4d" : "#a8640b"}" stroke="#fff" stroke-width="1"/>`; });
+  const leg = lines.map(l => `<span><i style="border-color:${l.color};${l.dash ? "border-top-style:dashed" : ""}"></i>${l.name}</span>`).join("");
+  box.innerHTML = `<p class="sub">${title}</p><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${title}">${g}</svg>
+    <div class="legend">${leg}<span><i style="border-color:#1f7a4d"></i>certified point</span><span><i style="border-color:#a8640b"></i>not certified</span></div>`;
+}
+
+async function runSweep() {
+  const key = $("sv").value, d = SV[key];
+  const a = parseFloat($("sfrom").value), b = parseFloat($("sto").value), n = Math.max(2, Math.min(60, parseInt($("ssteps").value) || 20));
+  $("sweepErr").hidden = true;
+  if (!isFinite(a) || !isFinite(b) || a === b) { $("sweepErr").textContent = "Enter two different numbers for From and To."; $("sweepErr").hidden = false; return; }
+  const baseReq = {
+    current_attenuation_db: parseFloat($("att").value),
+    message_size_bits: parseFloat($("size").value) * 1e6,
+    deadline_s: parseFloat($("deadline").value),
+    eps: parseFloat($("eps").value),
+    priority: $("prio").value,
+    infeasibility_rule: $("rule").value
+  };
+  $("sweepGo").disabled = true; sweepRows = [];
+  try {
+    for (let i = 0; i < n; i++) {
+      const v = a + (b - a) * i / (n - 1), r = {...baseReq};
+      if (key === "att") r.current_attenuation_db = v;
+      if (key === "deadline") r.deadline_s = v;
+      if (key === "size") r.message_size_bits = v * 1e6;
+      if (key === "eps") r.eps = v;
+      $("sweepProg").textContent = `Running point ${i + 1} of ${n}`;
+      const res = await post("/api/v1/decide", r);
+      sweepRows.push({x: v, feasible: res.feasible, reason: res.reason, p: res.predicted_delivery_prob,
+        target: 1 - r.eps, overhead: res.feasible && res.overhead < 999 ? res.overhead : null, modcod: res.action ? res.action.modcod_name : "none"});
+    }
+    $("sweepProg").textContent = `Done: ${sweepRows.filter(r => r.feasible).length} of ${n} points certified.`;
+    const xs = sweepRows.map(r => r.x);
+    $("sweepOut").innerHTML = '<div id="c1"></div><div id="c2"></div><div id="tbl"></div>';
+    lineChart($("c1"), "Delivery bound against target", xs,
+      [{name: "certified delivery bound", color: "#0b6e79", ys: sweepRows.map(r => r.p)},
+       {name: "target (1 − ε)", color: "#a8322b", dash: true, ys: sweepRows.map(r => r.target)}],
+      sweepRows.map(r => ({y: r.p, ok: r.feasible})), d.label, "Probability of on-time delivery");
+    lineChart($("c2"), "Airtime overhead of the chosen action", xs,
+      [{name: "overhead (×)", color: "#0b6e79", ys: sweepRows.map(r => r.overhead)}],
+      sweepRows.map(r => ({y: r.overhead, ok: true})), d.label, "Airtime overhead (×)");
+    $("tbl").innerHTML = `<details><summary>Table of results</summary><div class="tablewrap"><table><tr><th>${d.label}</th><th>Modulation and coding</th><th>Bound</th><th>Overhead</th><th>Status</th></tr>` +
+      sweepRows.map(r => `<tr><td>${d.fmt(r.x)}</td><td>${r.modcod}</td><td>${pct(r.p)}</td><td>${r.overhead == null ? "n/a" : r.overhead.toFixed(2) + "×"}</td><td>${r.feasible ? "certified" : r.reason}</td></tr>`).join("") +
+      `</table></div></details><p><button type="button" class="ghost" id="csvBtn">Download CSV</button></p>`;
+    $("csvBtn").onclick = () => {
+      const csv = ["x,modcod,bound,target,overhead,feasible,reason"].concat(sweepRows.map(r => [r.x, r.modcod, r.p, r.target, r.overhead ?? "", r.feasible, r.reason].join(","))).join("\n");
+      const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], {type: "text/csv"})); a.download = "rcdam_sweep_" + key + ".csv"; a.click();
+    };
+    refreshStats();
+  } catch (e) {
+    $("sweepErr").textContent = e.message; $("sweepErr").hidden = false; $("sweepProg").textContent = "";
+  } finally { $("sweepGo").disabled = false; }
+}
+$("sweepGo").onclick = runSweep;
+
 $("reconnect").onclick = health;
 health();
 </script>
