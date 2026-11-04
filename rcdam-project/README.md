@@ -1,159 +1,114 @@
-# RC-DAM: Risk-Calibrated, Deadline-Aware Mitigation for Satellite Links
+# RC-DAM
 
-Complete, verified implementation of the **RC-DAM** system according to the *RC-DAM Build Guide* (`RCDAM_Build_Guide.md`) and project specification.
+Risk-Calibrated, Deadline-Aware Mitigation (RC-DAM) is an experimental framework for evaluating deadline-constrained message transmission over a single GEO satellite link subject to time-varying atmospheric attenuation. It combines delayed-feedback forecasting, conformal risk calibration, adaptive coding and modulation (ACM), power adaptation, packet-level erasure protection, interleaving, and deadline-bounded transmission deferral.
 
-RC-DAM delivers ultra-reliable (up to $1 - \epsilon = 99.9\%$), deadline-constrained message transmission over single GEO satellite links undergoing severe, non-stationary atmospheric rain fades and scintillation.
+This is the repository's only Markdown document. It is the canonical reference for the project layout, current validation status, and reproducible commands.
 
----
+## Scope
 
-## 1. System Architecture & Milestones
+The framework evaluates a joint action over DVB-S2-like MODCOD selection, transmit-power steps, packet redundancy, interleaver depth, duplication, and deferral. For each message, the optimizer seeks the lowest-overhead feasible action subject to a delivery-by-deadline reliability target. When no candidate satisfies that target, it returns an explicit infeasibility diagnosis.
 
-The system is built milestone by milestone with strict empirical acceptance criteria:
+The simulator supports synthetic attenuation traces and ITU-R-inspired channel models. Results from synthetic channels are implementation evidence only; they are not a substitute for validation against field measurements or a basis for deployment claims.
+
+## Architecture
 
 ```
-                  +-------------------------------------------------------------+
-                  |  Channel Telemetry Stream A(t) (Rain Fade + Scintillation)   |
-                  +-------------------------------------------------------------+
-                                                 | (Delayed Feedback 1 RTT)
-                                                 v
-                  +-------------------------------------------------------------+
-                  | M2: Multi-Quantile Forecaster (QuantileMLP & Empirical)      |
-                  |     Predicts non-crossing quantiles of max A over horizon H |
-                  +-------------------------------------------------------------+
-                                                 |
-                                                 v
-                  +-------------------------------------------------------------+
-                  | M3: Stratified Conformal Risk Calibrator (Split-CQR & ACI)  |
-                  |     Guarantees coverage P(Z <= Z_hat) >= 1 - alpha across   |
-                  |     Clear (<1dB), Light (1-5dB), Moderate (5-10dB), Deep   |
-                  +-------------------------------------------------------------+
-                                                 | Calibrated Envelope Z_hat(alpha)
-                                                 v
-                  +-------------------------------------------------------------+
-                  | M4: Joint Redundancy Optimizer & Infeasibility Signaller    |
-                  |     Explores MODCODs, Power Steps, Erasure Coding & Deferral|
-                  |     Reports Feasible Action with Min Overhead or Alerts with|
-                  |     Reason ("capacity"|"deadline") and Achievable P* bound  |
-                  +-------------------------------------------------------------+
-                                                 |
-                                                 v
-                  +-------------------------------------------------------------+
-                  | M5: Frame-Level Ground Truth Simulator & Closed-Loop Harness|
-                  |     True attenuation Bernoulli frame losses & ARQ rounds    |
-                  |     Fair benchmark: V0..V6 & Oracle on identical streams    |
-                  +-------------------------------------------------------------+
+Delayed channel telemetry
+          |
+          v
+Quantile forecasting --> stratified conformal calibration
+          |                         |
+          +------------+------------+
+                       v
+      deadline-aware joint optimizer
+       /       |        |        \\
+   MODCOD    power   protection  deferral
+                       |
+                       v
+       frame-level ground-truth evaluation
 ```
 
-| Milestone | Key Modules | Description | Acceptance Criteria Status |
-|---|---|---|---|
-| **M0: Headroom Gate** | `rcdam/experiment.py`, `scripts/run_headroom.py` | Headroom evaluation across deadline sweeps (2s, 10s, 60s, 300s). Avoidable vs unrecoverable miss rates. | **PASSED** (`headroom.csv`, `headroom.png`) |
-| **M1: Data & Link Realism** | `rcdam/data.py`, `rcdam/link.py`, `rcdam/attenuation.py`, `rcdam/itur.py` | Time series loader, differential attenuation, ETSI EN 302 307 DVB-S2 verification, LDPC waterfall interpolation curves, ITU-R P.1853 synthesis. | **PASSED** (`test_m1_data_and_link.py`) |
-| **M2: Multi-Quantile Forecaster** | `rcdam/windows.py`, `rcdam/forecaster_baseline.py`, `rcdam/forecaster_nn.py` | Forward max statistic $Z_H$, non-leakage window features, monotonic QuantileMLP head via softplus cumsum, pinball loss evaluation. | **PASSED** (`forecaster.pt`, `forecaster_eval.csv`) |
-| **M3: Conformal Calibration** | `rcdam/calibration.py`, `scripts/calibrate.py`, `scripts/run_shift_test.py` | Stratified split-conformal CQR corrections per fade state, window thinning ($\ge 60$s), Adaptive Conformal Inference (ACI) under distribution shift. | **PASSED** (`calibration.json`, `shift_test.csv`) |
-| **M4: Evaluator & Optimizer** | `rcdam/evaluator.py`, `rcdam/optimizer.py` | Monte Carlo / analytic delivery probability evaluator, common random numbers, joint multi-lever optimizer, early infeasibility signalling with reason. | **PASSED** (`test_evaluator.py`, `test_optimizer.py`) |
-| **M5: Closed-Loop Harness** | `rcdam/groundtruth.py`, `rcdam/variants.py`, `scripts/run_h1_h4.py` | Frame-level Bernoulli ground truth, streaming priority mixture, benchmark across V0..V6 and Oracle. | **PASSED** (`h1_h4_results.csv`) |
-| **M6: Reporting & Reproducibility** | `scripts/make_figures.py`, `demo.py`, `tests/run_all_tests.py` | Publication figures, end-to-end verified demo, master test suite. | **PASSED** (`outputs/*.png`) |
+Key implementation areas:
 
----
+- `rcdam/attenuation.py`, `rcdam/itur.py`, `rcdam/data.py`, and `rcdam/beacon_loader.py`: channel generation, ITU-R-inspired propagation support, chronological data handling, and beacon ingestion.
+- `rcdam/windows.py`, `rcdam/forecaster_baseline.py`, `rcdam/forecaster_nn.py`, and `rcdam/forecaster.py`: non-leaking horizon windows and quantile forecasters.
+- `rcdam/calibration.py`, `rcdam/conformal.py`, and `rcdam/risk_control.py`: split/stratified conformal calibration and risk-control utilities.
+- `rcdam/link.py`, `rcdam/arq.py`, `rcdam/erasure.py`, `rcdam/cost.py`, and `rcdam/window_profile.py`: link, retransmission, packet-protection, cost, and window-profile models.
+- `rcdam/optimizer.py`, `rcdam/evaluator.py`, `rcdam/groundtruth.py`, `rcdam/variants.py`, and `rcdam/ablations.py`: decision optimization, evaluation, frame-level simulation, standardized variants, and ablations.
+- `rcdam/api.py`, `rcdam/api_models.py`, and `run_api.py`: optional FastAPI interface.
 
-## 2. Directory Layout
+## Project layout
 
 ```
 rcdam-project/
-  rcdam/
-    config.py               # Scenario dataclass (link parameters, delays, rain models)
-    attenuation.py          # Rain + scintillation generator (events, gauss_markov, itur_p1853)
-    itur.py                 # ITU-R P.618-13 & P.1853 Maseng-Bakken dynamic model
-    data.py                 # Time series loading, chronological splitting, propagation stats
-    link.py                 # ETSI EN 302 307 MODCOD table & per-MODCOD LDPC waterfall curves
-    arq.py                  # Expected-value fluid ARQ model
-    policies.py             # Baseline ACM policies (static, margin, linear predictive)
-    experiment.py           # Multi-seed scenario runners and deadline sweeps
-    stats.py                # Statistical aggregation (mean and 95% t-interval CI)
-    windows.py              # Window statistics Z_H and non-leaking feature windows
-    forecaster_baseline.py  # Empirical quantile forecaster (binned non-neural baseline)
-    forecaster_nn.py        # PyTorch QuantileMLP with non-crossing monotonic heads
-    calibration.py          # Stratified split-conformal calibration & online ACI tracking
-    evaluator.py            # Monte Carlo delivery probability evaluator under constant bound
-    optimizer.py            # Joint multi-lever optimizer with reason diagnostics
-    groundtruth.py          # Frame-level Bernoulli delivery simulation with ARQ rounds
-    variants.py             # Standardized policy interface: V0 to V6 and Zero-Delay Oracle
-  scripts/
-    run_step1.py            # Step 1 initial simulation
-    run_step2.py            # Step 2 multi-seed baseline comparison
-    run_headroom.py         # M0: Headroom analysis across deadlines
-    train_forecaster.py     # M2: Forecaster training and persistence evaluation
-    calibrate.py            # M3: Split-conformal calibration matrix persistence
-    run_shift_test.py       # M3: Channel distribution shift experiment
-    run_h1_h4.py            # M5: Closed-loop evaluation across all policy variants
-    make_figures.py         # M6: Publication figures generation
-  tests/
-    test_step2.py           # Step 2 baseline unit tests
-    test_m1_data_and_link.py# M1 tests (MODCODs verification, LDPC BLER curves, data load)
-    test_windows.py         # M2 tests (non-leakage, forward_window_max brute force)
-    test_calibration.py     # M3 tests (fade states, CQR quantiles, ACI update, persistence)
-    test_evaluator.py       # M4 tests (CRN monotonicity, clean channel, deadline bound)
-    test_optimizer.py       # M4 tests (clear sky max MODCOD, severe bound, infeasible reason)
-    test_groundtruth.py     # M5 tests (frame-level delivery, outage detection, variants)
-    run_all_tests.py        # Master test suite runner executing all unit tests
-  demo.py                   # Section 4.6 end-to-end demo script
-  outputs/                  # Generated figures, calibration matrix, and evaluation CSVs
-  RCDAM_Build_Guide.md      # Authoritative project build guide
-  README.md                 # Project documentation
+├── rcdam/                 # Core simulator, policies, optimizer, and API
+├── scripts/               # Reproducible experiments and figure generation
+│   └── legacy/            # Historical step scripts; not for new experiments
+├── tests/                 # Unit, regression, API, and infrastructure tests
+├── outputs/               # Generated CSV files, models, and figures (when run)
+├── demo.py                # End-to-end demonstration
+├── run_api.py             # API server entry point
+└── requirements.txt       # Python dependencies
 ```
 
----
+## Setup
 
-## 3. Quick Start & Reproduction Commands
+Use Python 3.10 or later in an isolated environment.
 
-### Run Master Test Suite
-```bash
+```powershell
+python -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
+pip install -r requirements.txt
+```
+
+## Validation and experiments
+
+Run commands from this directory (`rcdam-project/`). Outputs are written by the scripts to the configured output location.
+
+```powershell
+# Complete test suite
 python tests/run_all_tests.py
-```
 
-### Run End-to-End Section 4.6 Demo
-```bash
+# End-to-end demonstration
 python demo.py
-```
 
-### Run Milestone Experiments
-```bash
-# Milestone M0: Headroom Analysis across Deadlines
+# Core experiments
 python scripts/run_headroom.py --seeds 5 --hours 12.0 --workers 4
-
-# Milestone M2: Train Multi-Quantile Forecaster (QuantileMLP)
 python scripts/train_forecaster.py --hours 12.0 --epochs 12
-
-# Milestone M3: Compute Stratified Conformal Calibration Matrix
 python scripts/calibrate.py --hours 12.0 --thin-stride 300
-
-# Milestone M3: Distribution Shift Experiment (Base vs Heavy Rain Shift)
 python scripts/run_shift_test.py --hours 12.0
-
-# Milestone M5: Closed-Loop Evaluation Harness for Hypotheses H1-H4
 python scripts/run_h1_h4.py --seeds 3 --hours 6.0 --interval 45.0
 
-# Milestone M6: Generate Publication Figures
+# Reliability, infeasibility, and robustness evaluations
+python scripts/run_matched_reliability.py
+python scripts/run_infeasible_eval.py
+python scripts/run_risk_validation.py
+python scripts/run_stress_tests.py
+
+# Generate figures from experiment outputs
 python scripts/make_figures.py
 ```
 
----
+Some scripts provide additional command-line options; inspect them with `python <script> --help`. Run competing variants with identical traces, workloads, deadlines, and seed schedules. Keep training, calibration, and evaluation periods separate.
 
-## 4. Key Experimental Findings
+## Current evidence and limitations
 
-1. **Avoidable Deadline Headroom (M0):**
-   - For tight deadlines ($D=2.0$s), unrecoverable misses account for $0.50\%$, while avoidable misses in baseline ACM account for $0.16\%$, proving significant headroom for joint mitigation.
-   - For relaxed deadlines ($D \ge 60$s), avoidable misses vanish ($0.00\%$), demonstrating that extra levers are specifically vital for latency-sensitive traffic.
+The repository includes regression and infrastructure tests, including tests for data/link handling, forecast windows, calibration, evaluator and optimizer behavior, ground-truth simulation, ablations, risk validation, API contracts, and Phase 1 regression fixes.
 
-2. **Forecaster Accuracy (M2):**
-   - Held-out test set pinball loss: Persistence baseline = $0.2494$ vs QuantileMLP = $0.0363$ ($85.4\%$ error reduction).
-   - Monotonic non-crossing output guaranteed across all $\tau \in [0.1, 0.999]$.
+The recorded project status establishes Phase 1 regression fixes. Later evaluation phases and claims about comparative performance, calibrated coverage across every fade state, infeasibility-detection power, or the contribution of individual mitigation levers require regenerated results under the corresponding evaluation scripts. In particular, historical ablation outputs with identical configurations must not be interpreted as evidence that those levers improve performance.
 
-3. **Stratified Conformal Coverage under Channel Shift (M3):**
-   - Under heavy-rain distribution shift, uncalibrated forecasters experience severe deep-fade miscoverage (coverage drops to $96.5\%$ against a $99.0\%$ target).
-   - Pooled calibration fails to protect deep fades ($96.5\%$) because clear-sky observations dilute the correction.
-   - **Stratified Conformal Risk Control** restores deep-fade coverage to **$99.8\%$** ($99.0\%$ overall), strictly preserving the statistical safety guarantee.
+For an IEEE submission, archive the exact configuration, random seeds, raw CSV outputs, generated figures, dependency versions, and test logs alongside every reported result. Do not present synthetic-channel results as real-world validation.
 
-4. **Closed-Loop Performance (M5):**
-   - RC-DAM (V6) achieves near-zero avoidable deadline misses ($0.00\%$) while maintaining low transmission overhead ($1.06$ to $1.15$), matching or beating the theoretical Pareto efficiency of the Zero-Delay Oracle.
-   - Infeasibility diagnostic alerts correctly flag channel capacity collapse with $<1\%$ false alarm rate.
+## API (optional)
+
+Start the local API server after installing the requirements:
+
+```powershell
+python run_api.py
+```
+
+Refer to the OpenAPI interface exposed by the running FastAPI service for endpoint schemas.
+
+## Citation and research use
+
+This codebase is a research prototype. Before publishing quantitative claims, reproduce the experiment, retain the raw outputs, and verify that reported metrics use a shared workload and channel trace across compared methods.
