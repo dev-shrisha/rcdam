@@ -1,0 +1,8 @@
+variant_A,variant_B,miss_A_only,miss_B_only,mcnemar_p_value,significant_0_01
+V6_RC_DAM_Full,V1_Margin,1882,325,9.226220314816224e-266,True
+V6_RC_DAM_Full,V2_Predictive,1854,228,2.8362622e-316,True
+V6_RC_DAM_Full,V4_Conformal_MODCOD,1494,449,1.1236756158230246e-130,True
+V5_All_Levers,V1_Margin,1883,330,2.3601102734563407e-263,True
+V5_All_Levers,V2_Predictive,1853,231,4.699393674e-314,True
+V5_All_Levers,V4_Conformal_MODCOD,1492,451,1.2380602327347166e-129,True
+V6_RC_DAM_Full,V5_All_Levers,68,64,0.7941225170088048,False

@@ -3,3 +3,5 @@ scipy
 matplotlib
 pandas
 torch
+fastapi
+uvicorn

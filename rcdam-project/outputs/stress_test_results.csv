@@ -1,0 +1,4 @@
+preset,n_seeds,hours_per_seed,n_messages,n_oracle_infeasible,infeasible_rate,wilson_lo,wilson_hi,meets_100_infeasible_goal
+harsh,5,3.0,2681,221,0.0824,0.0726,0.0934,True
+deadline_1s,5,3.0,2683,103,0.0384,0.0318,0.0463,True
+size_50mb,5,3.0,2681,106,0.0395,0.0328,0.0476,True

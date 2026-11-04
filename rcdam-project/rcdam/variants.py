@@ -140,19 +140,48 @@ def policy_v4_conformal_modcod(ctx: PolicyContext) -> Decision:
 
 
 def _build_multi_horizon_bounds(ctx: PolicyContext) -> Dict[int, Dict[float, float]]:
-    grid_horizons = sorted(ctx.calibration_corr.keys()) if ctx.calibration_corr else HORIZONS
+    """Build bounds only for alpha levels actually present in calibration data.
+
+    Missing calibration entries are not silently replaced with a zero correction.
+    This matters especially for very small eps values (for example eps=0.001):
+    the calibration file must contain a tail level with alpha < eps.
+    """
+    if not ctx.calibration_corr or ctx.forecaster is None:
+        return {}
+
+    grid_horizons = sorted(ctx.calibration_corr.keys())
     st = fade_state(ctx.cur_att_db)
-    z_by_h_and_alpha = {}
-    for H in grid_horizons:
-        k_h = HORIZONS.index(H) if H in HORIZONS else min(range(len(HORIZONS)), key=lambda i: abs(HORIZONS[i] - H))
-        z_alpha = {}
-        for a in ALPHAS:
-            tau = 1.0 - a
-            q_raw = float(ctx.forecaster.predict(np.array([ctx.cur_att_db]), k_h, tau)[0])
-            corr = ctx.calibration_corr.get(H, {}).get(tau, {}).get(st, 0.0)
-            z_alpha[a] = q_raw + corr
-        z_by_h_and_alpha[H] = z_alpha
-    return z_by_h_and_alpha
+    z_by_horizon: Dict[int, Dict[float, float]] = {}
+
+    for horizon in grid_horizons:
+        calibration_at_horizon = ctx.calibration_corr.get(horizon, {})
+        alpha_bounds: Dict[float, float] = {}
+
+        for tau_key, state_corrections in calibration_at_horizon.items():
+            tau = float(tau_key)
+            alpha = 1.0 - tau
+            if not 0.0 < alpha < 1.0:
+                continue
+            if st not in state_corrections:
+                continue
+
+            k_h = (
+                HORIZONS.index(horizon)
+                if horizon in HORIZONS
+                else min(range(len(HORIZONS)), key=lambda i: abs(HORIZONS[i] - horizon))
+            )
+            q_raw = float(
+                ctx.forecaster.predict(
+                    np.array([ctx.cur_att_db]), k_h, tau
+                )[0]
+            )
+            correction = float(state_corrections[st])
+            alpha_bounds[alpha] = q_raw + correction
+
+        if alpha_bounds:
+            z_by_horizon[horizon] = alpha_bounds
+
+    return z_by_horizon
 
 
 def policy_v5_stage_a_levers(ctx: PolicyContext) -> Decision:
@@ -208,14 +237,12 @@ def policy_v6_full_rcdam(ctx: PolicyContext) -> Decision:
 def policy_v6_infeasible_rule(ctx: PolicyContext, rule: str = "R1") -> Decision:
     """V6 with explicit INFEASIBLE handling rules R1-R4.
 
-    R1: send-and-flag (transmit best action, warn sender) [default, same as V5/V6 today]
+    R1: send-and-flag (transmit best action, warn sender) [default]
     R2: defer (wait up to deadline slack; if feasible after deferral, send then; else R1)
-    R3: downgrade (relax eps by 2x and retry optimizer; if still infeasible, R1)
-    R4: reject (do not transmit; return Action=None with flagged=False and delivered=False)
+    R3: downgrade (relax eps by 2x with permission and retry optimizer; if still infeasible, R1)
+    R4: reject (do not transmit; return Action=None with reason='rejected' and overhead=0)
 
-    V6 always runs the full optimizer and checks feasibility. Unlike V5:
-    - V6 ALWAYS flags the decision.feasible field correctly (V5 sometimes returns feasible=True spuriously)
-    - V6 applies rule-specific logic on INFEASIBLE
+    Records full explanation in decision.decision_log and decision.reason.
     """
     z_by_alpha = _build_multi_horizon_bounds(ctx)
     dec = choose_decision(
@@ -225,17 +252,33 @@ def policy_v6_infeasible_rule(ctx: PolicyContext, rule: str = "R1") -> Decision:
     )
 
     if dec.feasible:
+        dec.decision_log = {
+            "rule": rule,
+            "original_feasible": True,
+            "outcome": "sent_normal",
+            "p_star": dec.p_lower_bound,
+            "reason": dec.reason,
+        }
         return dec  # feasible: all rules agree
 
     # INFEASIBLE: apply rule
+    original_p_star = dec.p_lower_bound
+
     if rule == "R1":
-        # Send anyway and flag (dec.feasible is already False, action is best effort)
+        # Send anyway and flag
+        dec.decision_log = {
+            "rule": "R1",
+            "original_feasible": False,
+            "outcome": "sent_and_flagged",
+            "original_p_star": original_p_star,
+            "reason": dec.reason,
+        }
         return dec
 
     elif rule == "R2":
         # Defer: try adding deferral up to deadline_slack
         deadline_slack = ctx.msg.deadline_s * 0.3  # try up to 30% of deadline as deferral
-        for defer_try in [0.5, 1.0, 2.0, 5.0]:
+        for defer_try in [0.2, 0.5, 1.0]:
             if defer_try > deadline_slack:
                 break
             msg_deferred = Message(
@@ -249,15 +292,22 @@ def policy_v6_infeasible_rule(ctx: PolicyContext, rule: str = "R1") -> Decision:
                 break
             dec2 = choose_decision(
                 z_by_alpha, msg_deferred, ctx.table, ctx.sc.clear_sky_esn0_db,
-                ctx.sc.symbol_rate_baud, ctx.sc.rtt_s, ctx.sc.one_way_delay_s
+                ctx.sc.symbol_rate_baud, ctx.sc.rtt_s, ctx.sc.one_way_delay_s,
+                use_validated_selection=True,
+                extra_defer_s=defer_try,
             )
             if dec2.feasible:
-                # Use deferred action with original deadline
+                # The optimizer was evaluated with deadline reduced by defer_try.
+                # Preserve its own chosen deferral as well; otherwise the returned
+                # action would differ from the action that passed validation.
+                total_defer = defer_try + dec2.action.defer_s
                 deferred_action = Action(
                     modcod=dec2.action.modcod,
                     power_db=dec2.action.power_db,
                     parity_frac=dec2.action.parity_frac,
-                    defer_s=defer_try,
+                    defer_s=total_defer,
+                    interleave_s=dec2.action.interleave_s,
+                    dup=dec2.action.dup,
                 )
                 return Decision(
                     action=deferred_action,
@@ -266,25 +316,47 @@ def policy_v6_infeasible_rule(ctx: PolicyContext, rule: str = "R1") -> Decision:
                     p_lower_bound=dec2.p_lower_bound,
                     overhead=dec2.overhead,
                     reason="ok_deferred",
+                    decision_log={
+                        "rule": "R2",
+                        "original_feasible": False,
+                        "outcome": "deferred",
+                        "defer_s": total_defer,
+                        "initial_wait_s": defer_try,
+                        "optimizer_defer_s": dec2.action.defer_s,
+                        "original_p_star": original_p_star,
+                        "p_star": dec2.p_lower_bound,
+                        "reason": "ok_deferred",
+                    },
                 )
         # Fallback to R1 if deferral didn't help
+        dec.decision_log = {
+            "rule": "R2",
+            "original_feasible": False,
+            "outcome": "defer_failed_sent_as_is",
+            "original_p_star": original_p_star,
+            "reason": dec.reason,
+        }
         return dec
 
     elif rule == "R3":
         # Downgrade: relax eps 2x and retry
+        priority_name = (
+            {1: "critical", 2: "normal", 3: "best_effort"}.get(ctx.msg.priority, "normal")
+            if isinstance(ctx.msg.priority, int) else ctx.msg.priority
+        )
         relaxed_msg = Message(
             size_bits=ctx.msg.size_bits,
-            priority=ctx.msg.priority,
+            priority=priority_name,
             deadline_s=ctx.msg.deadline_s,
             eps=min(ctx.msg.eps * 2.0, 0.5),
             arrival_idx=ctx.msg.arrival_idx,
         )
         dec3 = choose_decision(
             z_by_alpha, relaxed_msg, ctx.table, ctx.sc.clear_sky_esn0_db,
-            ctx.sc.symbol_rate_baud, ctx.sc.rtt_s, ctx.sc.one_way_delay_s
+            ctx.sc.symbol_rate_baud, ctx.sc.rtt_s, ctx.sc.one_way_delay_s,
+            use_validated_selection=True
         )
         if dec3.feasible:
-            # Mark as infeasible wrt original eps but do transmit
             return Decision(
                 action=dec3.action,
                 feasible=False,  # infeasible wrt original guarantee
@@ -292,8 +364,24 @@ def policy_v6_infeasible_rule(ctx: PolicyContext, rule: str = "R1") -> Decision:
                 p_lower_bound=dec3.p_lower_bound,
                 overhead=dec3.overhead,
                 reason="downgraded",
+                decision_log={
+                    "rule": "R3",
+                    "original_feasible": False,
+                    "outcome": "downgraded_sent",
+                    "relaxed_eps": relaxed_msg.eps,
+                    "original_p_star": original_p_star,
+                    "p_star": dec3.p_lower_bound,
+                    "reason": "downgraded",
+                },
             )
-        return dec  # still infeasible even relaxed
+        dec.decision_log = {
+            "rule": "R3",
+            "original_feasible": False,
+            "outcome": "downgrade_failed_sent_as_is",
+            "original_p_star": original_p_star,
+            "reason": dec.reason,
+        }
+        return dec
 
     elif rule == "R4":
         # Reject: do not transmit
@@ -304,9 +392,23 @@ def policy_v6_infeasible_rule(ctx: PolicyContext, rule: str = "R1") -> Decision:
             p_lower_bound=0.0,
             overhead=0.0,
             reason="rejected",
+            decision_log={
+                "rule": "R4",
+                "original_feasible": False,
+                "outcome": "rejected",
+                "original_p_star": original_p_star,
+                "reason": "rejected",
+            },
         )
 
-    return dec  # unknown rule -> R1
+    dec.decision_log = {
+        "rule": rule,
+        "original_feasible": False,
+        "outcome": "sent_and_flagged",
+        "original_p_star": original_p_star,
+        "reason": dec.reason,
+    }
+    return dec
 
 
 def policy_oracle(ctx: PolicyContext) -> Decision:
