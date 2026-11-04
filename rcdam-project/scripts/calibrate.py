@@ -25,7 +25,7 @@ from rcdam.calibration import fit_stratified_corrections, save_calibration_json,
 
 OUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs"))
 HORIZONS = [10, 20, 30, 50, 100, 200, 300, 600]
-TAUS = (0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99)
+TAUS = (0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 0.999)
 
 
 def make_dataset(seeds, scenario, horizons, stride_steps):

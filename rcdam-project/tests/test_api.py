@@ -126,6 +126,19 @@ def test_input_validation_error():
     assert resp.status_code == 422
 
 
+def test_default_eps_is_feasible_in_clear_sky():
+    """Regression: calibration must include tau>=0.995 so eps=0.01 is certifiable."""
+    resp = client.post("/api/v1/decide", json={"current_attenuation_db": 0.5, "deadline_s": 10.0})
+    assert resp.status_code == 200
+    assert resp.json()["feasible"] is True
+
+
+def test_invalid_rule_and_priority_rejected():
+    base = {"current_attenuation_db": 1.0}
+    assert client.post("/api/v1/decide", json={**base, "infeasibility_rule": "R9"}).status_code == 422
+    assert client.post("/api/v1/decide", json={**base, "priority": "bogus"}).status_code == 422
+
+
 if __name__ == "__main__":
     test_health_endpoint()
     test_decide_feasible_clearsky()
@@ -134,5 +147,7 @@ if __name__ == "__main__":
     test_calibration_status_endpoint()
     test_predictions_endpoint()
     test_input_validation_error()
+    test_default_eps_is_feasible_in_clear_sky()
+    test_invalid_rule_and_priority_rejected()
     print("All API integration tests passed successfully!")
 

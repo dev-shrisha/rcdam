@@ -1,20 +1,20 @@
 """Pydantic data models for the RC-DAM FastAPI backend service."""
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from pydantic import BaseModel, Field
 
 
 class DecisionRequest(BaseModel):
     """Payload to request an optimized deadline-aware transmission decision."""
     message_size_bits: float = Field(20e6, gt=0, description="Payload size in bits")
-    priority: str = Field("normal", description="'critical', 'normal', or 'best_effort'")
+    priority: Literal["critical", "normal", "best_effort"] = Field("normal", description="'critical', 'normal', or 'best_effort'")
     deadline_s: float = Field(2.0, gt=0, description="End-to-end delivery deadline in seconds")
-    eps: float = Field(0.01, gt=0.0, lt=1.0, description="Permitted deadline-failure probability epsilon")
+    eps: float = Field(0.01, gt=0.0, le=0.25, description="Permitted deadline-failure probability epsilon")
     current_attenuation_db: float = Field(..., ge=0.0, description="Estimated/measured channel attenuation in dB")
     features: Optional[Dict[str, float]] = Field(
         default=None,
         description="Optional channel features (slope5, slope30, max60)"
     )
-    infeasibility_rule: str = Field(
+    infeasibility_rule: Literal["R1", "R2", "R3", "R4"] = Field(
         "R1",
         description="Rule on INFEASIBLE: R1 (send-and-flag), R2 (defer), R3 (downgrade), R4 (reject)"
     )
