@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RC-DAM Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700&family=Public+Sans:wght@400;500;600&display=swap">
+<style>
+:root{--paper:#eef2f1;--panel:#fbfcfb;--ink:#13242c;--mute:#5a6d75;--line:#cdd8d8;--sea:#0b6e79;--sea-soft:#d6ebed;--ok:#1f7a4d;--ok-soft:#d9efe3;--warn:#a8640b;--warn-soft:#f6e6c8;--bad:#a8322b;--bad-soft:#f4d9d6}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 "Public Sans",system-ui,sans-serif;font-variant-numeric:tabular-nums}
+h1,h2,h3{font-family:"Bricolage Grotesque","Public Sans",sans-serif;margin:0;font-weight:700;letter-spacing:-.01em}
+header{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:center;justify-content:space-between;padding:18px clamp(16px,4vw,40px);border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:22px}
+header p{margin:0;color:var(--mute);font-size:13px}
+.conn{display:flex;align-items:center;gap:8px;font-size:13px}
+.conn input{width:230px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--mute)}
+.dot.up{background:var(--ok)}.dot.down{background:var(--bad)}
+main{display:grid;grid-template-columns:minmax(280px,360px) 1fr;gap:20px;padding:20px clamp(16px,4vw,40px);max-width:1200px;margin:0 auto}
+@media(max-width:820px){main{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px}
+section+section{margin-top:20px}
+h2{font-size:17px;margin-bottom:12px}
+label{display:block;font-size:13px;font-weight:600;margin:12px 0 4px}
+label small{font-weight:400;color:var(--mute)}
+input,select,button{font:inherit;color:inherit}
+input,select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:4px;background:#fff}
+input:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid var(--sea);outline-offset:1px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+button{cursor:pointer;border:1px solid var(--sea);background:var(--sea);color:#fff;font-weight:600;padding:10px 16px;border-radius:4px}
+button.ghost{background:transparent;color:var(--sea)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.go{width:100%;margin-top:18px}
+.verdict{display:flex;gap:14px;align-items:flex-start;padding:14px 16px;border-radius:6px;margin-bottom:16px}
+.verdict h3{font-size:20px}.verdict p{margin:2px 0 0;font-size:14px}
+.verdict.ok{background:var(--ok-soft);color:#124a2e}.verdict.warn{background:var(--warn-soft);color:#5e3706}.verdict.bad{background:var(--bad-soft);color:#6e1d18}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:16px}
+.kpi{border-left:3px solid var(--sea);padding:2px 0 2px 10px}
+.kpi b{display:block;font-size:22px;font-family:"Bricolage Grotesque",sans-serif}
+.kpi span{font-size:12px;color:var(--mute)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{text-align:left;padding:7px 0;border-bottom:1px solid var(--line)}
+th{font-weight:500;color:var(--mute);width:48%}
+.hint{color:var(--mute);font-size:13px;margin:0}
+.err{color:var(--bad);font-size:14px;margin:10px 0 0}
+details{margin-top:14px;font-size:13px}
+pre{background:#f0f4f4;padding:10px;border-radius:4px;overflow:auto;font-size:12px}
+.chart{width:100%;height:auto;display:block}
+.chart text{font:11px "Public Sans",sans-serif;fill:var(--mute)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--mute);margin-top:6px}
+.legend i{display:inline-block;width:18px;height:0;border-top:2px solid;vertical-align:middle;margin-right:6px}
+.outcome{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px}
+.right>section:first-child{min-height:120px}
+@media(prefers-reduced-motion:no-preference){.verdict{animation:in .25s ease-out}@keyframes in{from{opacity:0;transform:translateY(4px)}}}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>RC-DAM Console</h1>
+    <p>Risk-calibrated, deadline-aware transmission decisions for a single GEO satellite link</p>
+  </div>
+  <div class="conn">
+    <span class="dot" id="dot"></span><span id="connText">Checking API</span>
+    <input id="apiUrl" value="http://localhost:8000" aria-label="API address">
+    <button class="ghost" id="reconnect" type="button">Reconnect</button>
+  </div>
+</header>
+
+<main>
+  <div>
+    <section>
+      <h2>Message and channel</h2>
+      <form id="form">
+        <label for="att">Current attenuation <small>dB, from the receiver</small></label>
+        <input id="att" type="number" min="0" step="0.1" value="0.5" required>
+        <div class="row">
+          <div><label for="size">Message size <small>Mbit</small></label>
+            <input id="size" type="number" min="0.001" step="any" value="20" required></div>
+          <div><label for="deadline">Deadline <small>seconds</small></label>
+            <input id="deadline" type="number" min="0.1" step="any" value="10" required></div>
+        </div>
+        <div class="row">
+          <div><label for="eps">Allowed miss rate <small>ε</small></label>
+            <select id="eps">
+              <option value="0.1">10%</option><option value="0.05">5%</option><option value="0.02">2%</option><option value="0.01" selected>1%</option>
+            </select></div>
+          <div><label for="prio">Priority</label>
+            <select id="prio"><option value="normal">Normal</option><option value="critical">Critical</option><option value="best_effort">Best effort</option></select></div>
+        </div>
+        <label for="rule">If delivery can’t be certified</label>
+        <select id="rule">
+          <option value="R1">R1: send anyway and flag it</option>
+          <option value="R2">R2: wait for a better moment</option>
+          <option value="R3">R3: relax ε by 2× and retry</option>
+          <option value="R4">R4: reject, don’t transmit</option>
+        </select>
+        <button class="go" id="go" type="submit">Get decision</button>
+        <p class="err" id="err" role="alert" hidden></p>
+      </form>
+    </section>
+    <section>
+      <h2>Session totals</h2>
+      <div class="stats" id="stats"><p class="hint">No decisions yet.</p></div>
+    </section>
+  </div>
+
+  <div class="right">
+    <section aria-live="polite">
+      <h2>Decision</h2>
+      <div id="result"><p class="hint">Enter the channel state and press “Get decision”.</p></div>
+    </section>
+    <section>
+      <h2>Fade forecast for the next few seconds</h2>
+      <div id="chartBox"><p class="hint">Appears with the decision.</p></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const FADE = ["Clear sky", "Light fade", "Moderate fade", "Deep fade"];
+const REASON = {
+  capacity: "The channel can’t carry this message with enough certainty at this miss rate.",
+  deadline: "The deadline is shorter than the minimum airtime for this message.",
+  rejected: "Rule R4 rejected the message, so nothing was transmitted.",
+  no_calibration_data: "No calibration data is loaded on the server."
+};
+let base = () => $("apiUrl").value.replace(/\/+$/, "");
+let lastId = null;
+
+async function call(path, opts) {
+  const r = await fetch(base() + path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const d = j.detail;
+    throw new Error(Array.isArray(d) ? d.map(x => x.loc.slice(1).join(".") + ": " + x.msg).join("; ") : (d || "Request failed (" + r.status + ")"));
+  }
+  return j;
+}
+const post = (p, b) => call(p, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(b)});
+const pct = v => (v * 100).toFixed(1) + "%";
+
+async function health() {
+  try {
+    const h = await call("/api/v1/health");
+    $("dot").className = "dot up";
+    $("connText").textContent = h.model_loaded ? "Connected, model loaded" : "Connected, using fallback forecaster";
+    refreshStats();
+  } catch (e) {
+    $("dot").className = "dot down";
+    $("connText").textContent = "Can’t reach the API. Start it with python run_api.py";
+  }
+}
+
+async function refreshStats() {
+  try {
+    const s = await call("/api/v1/stats");
+    const k = (v, l) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`;
+    $("stats").innerHTML =
+      k(s.total_decisions, "decisions") + k(s.total_feasible, "certified") + k(s.total_infeasible, "flagged or rejected") +
+      k(s.delivery_rate == null ? "n/a" : pct(s.delivery_rate), "delivered (reported)") +
+      k(s.mean_overhead == null ? "n/a" : s.mean_overhead.toFixed(2) + "×", "mean overhead");
+  } catch (e) {}
+}
+
+function renderResult(d, req) {
+  let cls, title, text;
+  if (d.feasible) {
+    cls = "ok"; title = "Delivery certified";
+    text = `Lower bound on on-time delivery is ${pct(d.predicted_delivery_prob)}, against a target of ${pct(1 - req.eps)}.`;
+  } else if (d.reason === "rejected") {
+    cls = "bad"; title = "Not transmitted"; text = REASON.rejected;
+  } else {
+    cls = "warn"; title = "Can’t certify delivery";
+    text = (REASON[d.reason] || d.reason) + ` Best certifiable bound: ${pct(d.predicted_delivery_prob)}.` +
+      (d.action ? " The action below is sent and flagged." : "");
+  }
+  let html = `<div class="verdict ${cls}"><div><h3>${title}</h3><p>${text}</p></div></div>`;
+  if (d.action) {
+    const a = d.action;
+    html += `<div class="kpis">
+      <div class="kpi"><b>${a.modcod_name}</b><span>modulation and coding</span></div>
+      <div class="kpi"><b>${d.overhead >= 999 ? "n/a" : d.overhead.toFixed(2) + "×"}</b><span>airtime overhead</span></div>
+      <div class="kpi"><b>${pct(d.predicted_delivery_prob)}</b><span>delivery bound</span></div></div>
+    <table>
+      <tr><th>Spectral efficiency</th><td>${a.spectral_eff.toFixed(2)} bit/symbol</td></tr>
+      <tr><th>Extra transmit power</th><td>${a.power_db} dB</td></tr>
+      <tr><th>Parity added</th><td>${(a.parity_frac * 100).toFixed(0)}%</td></tr>
+      <tr><th>Wait before sending</th><td>${a.defer_s} s</td></tr>
+      <tr><th>Interleaver span</th><td>${a.interleave_s} s</td></tr>
+      <tr><th>Copies sent</th><td>${a.dup}</td></tr>
+    </table>
+    <div class="outcome"><span class="hint">Did it arrive on time?</span>
+      <button type="button" class="ghost" data-out="true">Delivered</button>
+      <button type="button" class="ghost" data-out="false">Missed</button>
+      <span class="hint" id="outMsg"></span></div>`;
+  }
+  html += `<details><summary>Decision log</summary><pre>${JSON.stringify(d.decision_log, null, 2)}</pre></details>`;
+  $("result").innerHTML = html;
+  lastId = d.decision_id;
+  document.querySelectorAll("[data-out]").forEach(b => b.onclick = async () => {
+    try {
+      await post("/api/v1/report_outcome", {decision_id: lastId, delivered: b.dataset.out === "true"});
+      $("outMsg").textContent = "Recorded.";
+      document.querySelectorAll("[data-out]").forEach(x => x.disabled = true);
+      refreshStats();
+    } catch (e) { $("outMsg").textContent = e.message; }
+  });
+}
+
+function renderChart(p) {
+  const hs = Object.keys(p.quantile_predictions).map(k => +k.match(/\d+/)[0]).sort((a, b) => a - b);
+  const qs = [["q_90", "90th percentile", "#6a9aa1", ""], ["q_95", "95th percentile", "#2f7f89", ""], ["q_99", "99th percentile", "#0b4d55", ""]];
+  const val = (q, h, corr) => p.quantile_predictions["horizon_" + h + "_steps"][q] + (corr ? p.calibration_corrections["horizon_" + h + "_steps"][q] : 0);
+  const all = [];
+  hs.forEach(h => qs.forEach(([q]) => { all.push(val(q, h, false), val(q, h, true)); }));
+  const lo = Math.floor(Math.min(...all) - 1), hi = Math.ceil(Math.max(...all) + 1);
+  const W = 640, H = 260, L = 44, R = 14, T = 12, B = 36;
+  const x = h => L + (h - hs[0]) / ((hs[hs.length - 1] - hs[0]) || 1) * (W - L - R);
+  const y = v => T + (hi - v) / ((hi - lo) || 1) * (H - T - B);
+  const line = (q, c, corr) => `<polyline fill="none" stroke="${c}" stroke-width="${corr ? 2.5 : 2}" ${corr ? 'stroke-dasharray="6 4"' : ""} points="${hs.map(h => x(h) + "," + y(val(q, h, corr))).join(" ")}"/>`;
+  let g = "";
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4; g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="#d9e2e2"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v.toFixed(0)}</text>`; }
+  hs.forEach(h => g += `<text x="${x(h)}" y="${H - 14}" text-anchor="middle">${(h / 10).toFixed(0)} s</text>`);
+  g += `<text x="${(L + W - R) / 2}" y="${H - 1}" text-anchor="middle">Look-ahead window</text>`;
+  g += `<text x="12" y="${T + 8}" transform="rotate(-90 12 ${(T + H - B) / 2 + 40})" text-anchor="middle">Worst-case attenuation (dB)</text>`;
+  $("chartBox").innerHTML =
+    `<p class="hint">Currently ${FADE[p.fade_state]} (${p.current_attenuation_db} dB). Solid lines are raw forecasts; the dashed line adds the calibration correction for this fade state.</p>
+     <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Forecast of worst-case attenuation by look-ahead window">${g}
+     ${qs.map(([q, , c]) => line(q, ["#6a9aa1", "#2f7f89", "#0b4d55"][qs.findIndex(z => z[0] === q)], false)).join("")}${line("q_99", "#a8322b", true)}</svg>
+     <div class="legend">${qs.map(([, l, c]) => `<span><i style="border-color:${c}"></i>${l}</span>`).join("")}<span><i style="border-color:#a8322b;border-top-style:dashed"></i>99th percentile, calibrated</span></div>`;
+}
+
+$("form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  $("err").hidden = true; $("go").disabled = true;
+  const att = parseFloat($("att").value);
+  const req = {
+    current_attenuation_db: att,
+    message_size_bits: parseFloat($("size").value) * 1e6,
+    deadline_s: parseFloat($("deadline").value),
+    eps: parseFloat($("eps").value),
+    priority: $("prio").value,
+    infeasibility_rule: $("rule").value
+  };
+  try {
+    const [d, p] = await Promise.all([post("/api/v1/decide", req), call("/api/v1/predictions/" + att)]);
+    renderResult(d, req); renderChart(p); refreshStats();
+  } catch (e) {
+    $("err").textContent = e.message; $("err").hidden = false;
+  } finally { $("go").disabled = false; }
+});
+$("reconnect").onclick = health;
+health();
+</script>
+</body>
+</html>

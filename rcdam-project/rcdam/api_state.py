@@ -2,6 +2,7 @@
 import os
 import threading
 import uuid
+from collections import OrderedDict
 from typing import Dict, Any, Optional, List
 import numpy as np
 
@@ -13,6 +14,8 @@ from .variants import HORIZONS, ALPHAS
 
 
 class ApiState:
+    MAX_STORED = 10000  # cap in-memory decision/outcome history
+
     def __init__(self, out_dir: Optional[str] = None):
         if out_dir is None:
             out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs"))
@@ -21,8 +24,8 @@ class ApiState:
         self.sc = preset_base()
 
         self._lock = threading.Lock()
-        self.decisions: Dict[str, Dict[str, Any]] = {}
-        self.outcomes: Dict[str, Dict[str, Any]] = {}
+        self.decisions: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self.outcomes: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 
         # Load trained forecaster if present
         fc_path = os.path.join(out_dir, "forecaster_baseline.json")
@@ -51,12 +54,17 @@ class ApiState:
         d_id = str(uuid.uuid4())
         with self._lock:
             self.decisions[d_id] = {**dec_data, "decision_id": d_id}
+            while len(self.decisions) > self.MAX_STORED:
+                old, _ = self.decisions.popitem(last=False)
+                self.outcomes.pop(old, None)
         return d_id
 
     def record_outcome(self, outcome_data: Dict[str, Any]):
         d_id = outcome_data["decision_id"]
         with self._lock:
             self.outcomes[d_id] = outcome_data
+            while len(self.outcomes) > self.MAX_STORED:
+                self.outcomes.popitem(last=False)
 
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:

@@ -3,12 +3,13 @@
 Connects frontend applications, satellite terminals, and simulation harnesses
 to the RC-DAM decision engine via standard JSON REST endpoints.
 """
+import os
 import numpy as np
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .api_models import (
-
     DecisionRequest,
     DecisionResponse,
     ActionModel,
@@ -31,10 +32,12 @@ app = FastAPI(
 )
 
 # Enable CORS for web frontend integration
+# Set RCDAM_CORS_ORIGINS="https://your-frontend.com,http://localhost:5173" in production.
+_origins = [o.strip() for o in os.environ.get("RCDAM_CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_origins,
+    allow_credentials=False,  # wildcard origin + credentials is unsafe and unnecessary (no cookies used)
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -110,7 +113,7 @@ def decide_action(req: DecisionRequest):
         "overhead": dec.overhead,
         "reason": dec.reason,
         "rule": req.infeasibility_rule,
-        "req": req.dict(),
+        "req": req.model_dump(),
     })
 
     return DecisionResponse(
@@ -134,7 +137,7 @@ def report_outcome(req: ReportOutcomeRequest):
             detail=f"Decision ID '{req.decision_id}' not found in active decision store"
         )
 
-    state.record_outcome(req.dict())
+    state.record_outcome(req.model_dump())
     return ReportOutcomeResponse(status="recorded", decision_id=req.decision_id)
 
 
@@ -181,3 +184,8 @@ def system_stats():
     """Retrieves operational telemetry, total decisions, delivery rates, and mean overhead."""
     return StatsResponse(**state.get_stats())
 
+
+# Serve the operator console at http://localhost:8000/ui/
+_ui_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
+if os.path.isdir(_ui_dir):
+    app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")

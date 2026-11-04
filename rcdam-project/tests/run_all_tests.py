@@ -144,6 +144,22 @@ def run_all():
     except ImportError as e:
         print(f"[SKIP] Phase 1/2 tests: {e}\n")
 
+    try:
+        from tests.test_api import (
+            test_health_endpoint, test_decide_feasible_clearsky, test_decide_infeasible_fade_and_r4,
+            test_report_outcome_flow, test_calibration_status_endpoint, test_predictions_endpoint,
+            test_input_validation_error, test_default_eps_is_feasible_in_clear_sky,
+            test_invalid_rule_and_priority_rejected,
+        )
+        print("--- [FastAPI Backend Tests] ---")
+        test_health_endpoint(); test_decide_feasible_clearsky(); test_decide_infeasible_fade_and_r4()
+        test_report_outcome_flow(); test_calibration_status_endpoint(); test_predictions_endpoint()
+        test_input_validation_error(); test_default_eps_is_feasible_in_clear_sky()
+        test_invalid_rule_and_priority_rejected()
+        print("-> API Tests Passed.\n")
+    except ImportError as e:
+        print(f"[SKIP] API tests (pip install fastapi httpx): {e}\n")
+
     print("==================================================")
     print("   ALL RC-DAM TESTS PASSED WITH 100% SUCCESS!     ")
     print("==================================================")
