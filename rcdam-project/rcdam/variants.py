@@ -429,3 +429,60 @@ def policy_oracle(ctx: PolicyContext) -> Decision:
         ctx.sc.symbol_rate_baud, ctx.sc.rtt_s, ctx.sc.one_way_delay_s,
         use_validated_selection=False
     )
+# APPEND THIS BLOCK TO THE END OF rcdam/variants.py
+# ====================================================================
+# V7: Window-conformal + trajectory-aware joint optimizer (NEW)
+# =============================================================================
+def policy_v7_window_conformal(ctx: PolicyContext, wc, burst_s: float = 1.0,
+                               alpha_split: float = 0.5, n_mc: int = 150) -> Decision:
+    """Union-bound risk split: eps = alpha_window + alpha_delivery.
+
+    1) alpha_w = alpha_split*eps  -> conformal bound on the WINDOW-MAX attenuation.
+    2) alpha_d = (1-alpha_split)*eps -> required miss probability of the chosen action
+       evaluated on the worst-case burst profile built from that bound.
+    Returns INFEASIBLE explicitly (flag) when no action meets alpha_d.
+    """
+    from .trajectory_evaluator import p_deliver_profile
+    msg, sc, table = ctx.msg, ctx.sc, ctx.table
+    eps = msg.eps
+    span_s = msg.deadline_s
+    peak = wc.bound(ctx.cur_att_db, span_s, alpha_split * eps)
+    K = int(np.ceil(msg.size_bits / FRAME_BITS))
+    ref = msg.size_bits / (sc.symbol_rate_baud * table.eff.max())
+
+    grid = []
+    for m in range(len(table.eff)):
+        fs = FRAME_BITS / (sc.symbol_rate_baud * table.eff[m])
+        if K * fs + sc.one_way_delay_s > msg.deadline_s:
+            continue
+        for pw in (0.0, 1.0, 2.0):
+            for pr in (0.0, 0.05, 0.15, 0.3):
+                for df in (0.0, 0.5):
+                    for il in (0.0, 1.0):
+                        a = Action(m, pw, pr, df, interleave_s=il)
+                        cost = (int(np.ceil(K * (1 + pr))) * fs) / ref + 0.03 * pw
+                        grid.append((cost, a))
+    grid.sort(key=lambda x: x[0])
+
+    best_p, best = -1.0, None
+    tried = 0
+    for cost, a in grid:
+        # cheap screen: skip actions that cannot even work with the burst at full strength
+        esn0_pk = sc.clear_sky_esn0_db + a.power_db - peak
+        if table.thr[a.modcod] - esn0_pk > 4.0 and a.parity_frac < 0.3:
+            continue
+        tried += 1
+        if tried > 60:
+            break
+        p = p_deliver_profile(a, msg.size_bits, msg.deadline_s, table,
+                              sc.clear_sky_esn0_db, sc.symbol_rate_baud, sc.rtt_s,
+                              sc.one_way_delay_s, ctx.cur_att_db, peak, burst_s,
+                              n_pos=4, n_mc=n_mc, seed=int(msg.arrival_idx) % 2**31)
+        if p > best_p:
+            best_p, best = p, (cost, a)
+        if p >= 1.0 - (1.0 - alpha_split) * eps:
+            return Decision(a, True, alpha_split * eps, p, cost, "ok")
+    if best is None:
+        a = Action(0, 2.0, 0.3, 0.0)
+        return Decision(a, False, alpha_split * eps, 0.0, 1.0, "capacity")
+    return Decision(best[1], False, alpha_split * eps, max(best_p, 0.0), best[0], "capacity")
