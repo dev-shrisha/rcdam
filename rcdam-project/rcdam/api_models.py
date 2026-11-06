@@ -16,7 +16,12 @@ class DecisionRequest(BaseModel):
     )
     infeasibility_rule: Literal["R1", "R2", "R3", "R4"] = Field(
         "R1",
-        description="Rule on INFEASIBLE: R1 (send-and-flag), R2 (defer), R3 (downgrade), R4 (reject)"
+        description="Rule on INFEASIBLE: R1 (send-and-flag), R2 (defer), R3 (relax, explicitly reported), R4 (reject)"
+    )
+    engine: Literal["window_conformal", "legacy"] = Field(
+        "window_conformal",
+        description="'window_conformal' = window-level conformal + trajectory evaluator (default); "
+                    "'legacy' = original single-horizon pipeline"
     )
 
 
@@ -42,6 +47,15 @@ class DecisionResponse(BaseModel):
     reason: str = Field(..., description="'ok', 'ok_deferred', 'capacity', 'deadline', 'rejected', etc.")
     infeasibility_rule: str = Field(..., description="Active infeasibility rule applied")
     decision_log: Optional[Dict[str, Any]] = Field(None, description="Detailed decision audit trace")
+    engine: str = Field("legacy", description="Decision engine that produced this response")
+    requested_eps: Optional[float] = Field(None, description="Failure probability the caller asked for")
+    predicted_p: Optional[float] = Field(None, description="Quantity 1: predicted delivery probability (MC point estimate)")
+    calibrated_lower_bound: Optional[float] = Field(None, description="Quantity 2: calibrated lower confidence bound")
+    window_bound_db: Optional[float] = Field(None, description="Conformal bound on the window-maximum attenuation (dB)")
+    meets_original_requirement: Optional[bool] = Field(None, description="True only if the ORIGINAL eps is met")
+    relaxed_eps: Optional[float] = Field(None, description="Relaxed eps used by rule R3 (original NOT met)")
+    warning: Optional[str] = Field(None, description="Explicit warning, e.g. requirement was relaxed")
+    infeasibility: Optional[Dict[str, Any]] = Field(None, description="Structured explanation of WHY infeasible")
 
 
 class ReportOutcomeRequest(BaseModel):
@@ -80,6 +94,14 @@ class StatsResponse(BaseModel):
     total_delivered: int
     delivery_rate: Optional[float]
     mean_overhead: Optional[float]
+    # --- live reliability tracking (needs reported outcomes) ---
+    claimed_feasible_with_outcome: int = 0
+    false_feasible: int = 0
+    false_feasible_rate: Optional[float] = None
+    mean_predicted_p: Optional[float] = None
+    mean_calibrated_lb: Optional[float] = None
+    actual_rate_on_claimed_feasible: Optional[float] = None
+    validated_lower_bound: Optional[float] = None
 
 
 class HealthResponse(BaseModel):

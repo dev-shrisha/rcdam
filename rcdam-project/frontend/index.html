@@ -149,6 +149,8 @@ const REASON = {
   capacity: "The channel can’t carry this message with enough certainty at this miss rate.",
   deadline: "The deadline is shorter than the minimum airtime for this message.",
   rejected: "Rule R4 rejected the message, so nothing was transmitted.",
+  relaxed_feasible: "The ORIGINAL reliability requirement cannot be met. A relaxed requirement can (rule R3); the original is NOT satisfied.",
+  ok_deferred: "Feasible after deferring transmission.",
   no_calibration_data: "No calibration data is loaded on the server."
 };
 let base = () => $("apiUrl").value.replace(/\/+$/, "");
@@ -221,6 +223,12 @@ function renderResult(d, req) {
       <button type="button" class="ghost" data-out="false">Missed</button>
       <span class="hint" id="outMsg"></span></div>`;
   }
+  if (d.warning) html += `<div class="verdict warn"><div><p><b>Warning:</b> ${d.warning}</p></div></div>`;
+  if (d.infeasibility && d.infeasibility.reasons) {
+    html += `<details open><summary>Why infeasible</summary><ul>` + d.infeasibility.reasons.map(r =>
+      `<li><b>${r.code}</b>: ${r.message} <code>${JSON.stringify(r.evidence)}</code></li>`).join("") + `</ul></details>`;
+  }
+  if (d.predicted_p != null) html += `<p class="hint">Predicted P: ${pct(d.predicted_p)} · calibrated lower bound: ${pct(d.calibrated_lower_bound)} · window attenuation bound: ${d.window_bound_db == null ? "n/a" : d.window_bound_db.toFixed(1) + " dB"}</p>`;
   html += `<details><summary>Decision log</summary><pre>${JSON.stringify(d.decision_log, null, 2)}</pre></details>`;
   $("result").innerHTML = html;
   lastId = d.decision_id;

@@ -11,6 +11,9 @@ from .link import ModcodTable
 from .forecaster_baseline import EmpiricalQuantileForecaster
 from .calibration import load_calibration_json, fade_state
 from .variants import HORIZONS, ALPHAS
+from .window_conformal import WindowConformal
+from .engine import EngineParams
+from .reliability import cp_lower
 
 
 class ApiState:
@@ -50,6 +53,30 @@ class ApiState:
             self.calibrated = False
             self.calibration_file = "none"
 
+        # Window-level conformal calibration (drives the default decision engine)
+        self.engine_params = EngineParams()
+        self.wc = self._load_or_fit_wc(out_dir)
+
+    def _load_or_fit_wc(self, out_dir: str) -> WindowConformal:
+        """Load outputs/window_conformal_api.json, or fit it once from simulated calibration traces."""
+        from dataclasses import replace
+        from .attenuation import generate_attenuation_db
+        path = os.path.join(out_dir, "window_conformal_api.json")
+        if os.path.exists(path):
+            wc = WindowConformal.load(path)
+            if wc.supports_offsets:
+                return wc
+        wc = WindowConformal()
+        for s in range(201, 204):                      # seeds disjoint from training/test seeds
+            sc = replace(self.sc, seed=s, duration_h=4.0)
+            wc.fit_from_trace(generate_attenuation_db(sc), sc.dt_s, sc.feedback_delay_steps)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            wc.save(path)
+        except OSError:
+            pass
+        return wc
+
     def record_decision(self, dec_data: Dict[str, Any]) -> str:
         d_id = str(uuid.uuid4())
         with self._lock:
@@ -78,7 +105,21 @@ class ApiState:
             overheads = [d["overhead"] for d in self.decisions.values() if "overhead" in d and np.isfinite(d["overhead"])]
             mean_ov = float(np.mean(overheads)) if overheads else None
 
+            # live reliability tracking on decisions that CLAIMED feasibility and got an outcome
+            cl = [(d, self.outcomes[i]) for i, d in self.decisions.items()
+                  if d.get("feasible") and i in self.outcomes]
+            n_cl = len(cl)
+            n_ok = sum(1 for _, o in cl if o.get("delivered"))
+            pp = [d.get("predicted_p") for d, _ in cl if d.get("predicted_p") is not None]
+            lb = [d.get("predicted_lb") for d, _ in cl if d.get("predicted_lb") is not None]
             return {
+                "claimed_feasible_with_outcome": n_cl,
+                "false_feasible": n_cl - n_ok,
+                "false_feasible_rate": ((n_cl - n_ok) / n_cl) if n_cl else None,
+                "mean_predicted_p": float(np.mean(pp)) if pp else None,
+                "mean_calibrated_lb": float(np.mean(lb)) if lb else None,
+                "actual_rate_on_claimed_feasible": (n_ok / n_cl) if n_cl else None,
+                "validated_lower_bound": cp_lower(n_ok, n_cl) if n_cl else None,
                 "total_decisions": n_tot,
                 "total_feasible": n_feas,
                 "total_infeasible": n_infeas,
