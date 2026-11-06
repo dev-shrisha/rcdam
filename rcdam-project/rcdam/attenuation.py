@@ -57,10 +57,24 @@ def _rain_gauss_markov(sc: Scenario, rng: np.random.Generator) -> np.ndarray:
     return gate * np.exp(sc.rain_ln_mean + sc.rain_ln_std * intensity)
 
 
-def _rain_itur_p1853(sc: Scenario, rng: np.random.Generator) -> np.ndarray:
-    """ITU-R P.1853 / Maseng-Bakken dynamic synthesis calibrated to ITU-R P.618 statistics."""
+_ITU_CACHE = {}
+
+
+def _itu_params(sc: Scenario):
     from .itur import calibrate_maseng_bakken_to_itu_r, EarthStationConfig
-    params = calibrate_maseng_bakken_to_itu_r(EarthStationConfig())
+    key = (sc.itu_freq_ghz, sc.itu_elev_deg, sc.itu_lat_deg, sc.itu_alt_km, sc.itu_r001_mmh, sc.itu_tilt_deg)
+    if key not in _ITU_CACHE:
+        cfg = EarthStationConfig(freq_ghz=sc.itu_freq_ghz, elevation_deg=sc.itu_elev_deg,
+                                 station_lat_deg=sc.itu_lat_deg, station_alt_km=sc.itu_alt_km,
+                                 rain_rate_001_mmh=sc.itu_r001_mmh, polarization_tilt_deg=sc.itu_tilt_deg)
+        _ITU_CACHE[key] = calibrate_maseng_bakken_to_itu_r(cfg)
+    return _ITU_CACHE[key]
+
+
+def _rain_itur_p1853(sc: Scenario, rng: np.random.Generator) -> np.ndarray:
+    """ITU-R P.1853 / Maseng-Bakken dynamic synthesis calibrated to ITU-R P.618 statistics
+    for the site given by the Scenario's itu_* fields."""
+    params = _itu_params(sc)
     n, dt = sc.n_steps, sc.dt_s
     tau_slow = 1.0 / params["rain_beta_per_s"]
     occurrence = _ar1(n, tau_slow, dt, rng)

@@ -43,6 +43,14 @@ class Scenario:
     scint_std_db: float = 0.15       # additive scintillation
     scint_tau_s: float = 1.0
 
+    # --- ITU-R P.618 / P.1853 site (used only when rain_model == "itur"); defaults keep old behaviour ---
+    itu_freq_ghz: float = 20.0
+    itu_elev_deg: float = 35.0
+    itu_lat_deg: float = 45.0
+    itu_alt_km: float = 0.2
+    itu_r001_mmh: float = 35.0           # rain rate exceeded 0.01 % of an average year (P.837)
+    itu_tilt_deg: float = 45.0           # polarisation tilt (45 = circular)
+
     # --- smooth block-error model (placeholder waterfall; replace with real LDPC curves) ---
     bler_slope_decades_per_db: float = 15.0   # steepness of the LDPC waterfall
     bler_qef_log10: float = -7.0              # log10 BLER at the QEF threshold
@@ -137,3 +145,33 @@ def get_preset(name: str, **kwargs) -> Scenario:
         raise ValueError(f"Unknown preset '{name}'. Choose from: {sorted(PRESET_REGISTRY.keys())}")
     return PRESET_REGISTRY[name](**kwargs)
 
+
+
+def geo_elevation_deg(lat_deg: float, site_lon_deg: float, sat_lon_deg: float) -> float:
+    """Elevation angle of a GEO satellite seen from a ground site."""
+    import math
+    phi, dl = math.radians(lat_deg), math.radians(site_lon_deg - sat_lon_deg)
+    cg = math.cos(phi) * math.cos(dl)
+    sg = math.sqrt(max(1e-12, 1.0 - cg * cg))
+    return math.degrees(math.atan((cg - 0.15127) / sg))
+
+
+def preset_itu_site(**kwargs) -> Scenario:
+    """Ka-band (20 GHz) GEO downlink with rain statistics from ITU-R P.618 / P.1853.
+
+    Site defaults ~ Bengaluru (13.0 N, 77.6 E, 0.92 km) to a GEO satellite at 83 E.
+    !! itu_r001_mmh=60 is a PLACEHOLDER: replace with the ITU-R P.837 value for YOUR exact site
+    (and set itu_freq_ghz / itu_elev_deg for your actual link). Results on this channel are
+    still SIMULATION: only the long-term rain statistics follow ITU-R; the time dynamics follow
+    the Maseng-Bakken process of ITU-R P.1853."""
+    from dataclasses import replace
+    sc = Scenario(
+        duration_h=12.0, rain_model="itur", msg_bits=20e6, deadline_s=2.0, msg_interval_s=60.0,
+        clear_sky_esn0_db=22.0,
+        itu_freq_ghz=20.0, itu_lat_deg=13.0, itu_alt_km=0.92, itu_r001_mmh=60.0,
+        itu_elev_deg=round(geo_elevation_deg(13.0, 77.6, 83.0), 1), itu_tilt_deg=45.0,
+    )
+    return replace(sc, **kwargs) if kwargs else sc
+
+
+PRESET_REGISTRY["itu_site"] = preset_itu_site

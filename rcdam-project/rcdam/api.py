@@ -24,6 +24,7 @@ from .api_state import ApiState
 from .optimizer import Message, Action
 from .calibration import fade_state
 from .variants import PolicyContext, policy_v6_infeasible_rule, HORIZONS, ALPHAS
+from .engine import decide as engine_decide
 
 app = FastAPI(
     title="RC-DAM Decision Engine API",
@@ -90,7 +91,11 @@ def decide_action(req: DecisionRequest):
         calibration_corr=state.cal_corr,
     )
 
-    dec = policy_v6_infeasible_rule(ctx, rule=req.infeasibility_rule)
+    if req.engine == "window_conformal":
+        dec = engine_decide(ctx, state.wc, state.engine_params, rule=req.infeasibility_rule)
+    else:
+        dec = policy_v6_infeasible_rule(ctx, rule=req.infeasibility_rule)
+    log = dec.decision_log or {}
 
     action_model = None
     if dec.action is not None:
@@ -110,6 +115,8 @@ def decide_action(req: DecisionRequest):
         "feasible": dec.feasible,
         "action": dec.action,
         "predicted_p_lb": dec.p_lower_bound,
+        "predicted_lb": dec.p_lower_bound,
+        "predicted_p": log.get("predicted_p"),
         "overhead": dec.overhead,
         "reason": dec.reason,
         "rule": req.infeasibility_rule,
@@ -125,6 +132,15 @@ def decide_action(req: DecisionRequest):
         reason=dec.reason,
         infeasibility_rule=req.infeasibility_rule,
         decision_log=dec.decision_log,
+        engine=req.engine,
+        requested_eps=req.eps,
+        predicted_p=log.get("predicted_p"),
+        calibrated_lower_bound=float(dec.p_lower_bound),
+        window_bound_db=log.get("window_bound_db"),
+        meets_original_requirement=log.get("meets_original_requirement", dec.feasible),
+        relaxed_eps=log.get("relaxed_eps"),
+        warning=log.get("warning"),
+        infeasibility=log.get("infeasibility"),
     )
 
 
