@@ -92,7 +92,8 @@ def decide_action(req: DecisionRequest):
     )
 
     if req.engine == "window_conformal":
-        dec = engine_decide(ctx, state.wc, state.engine_params, rule=req.infeasibility_rule)
+        dec = engine_decide(ctx, state.wc, state.engine_params, rule=req.infeasibility_rule,
+                               explain=req.explain_alternatives)
     else:
         dec = policy_v6_infeasible_rule(ctx, rule=req.infeasibility_rule)
     log = dec.decision_log or {}
@@ -141,6 +142,8 @@ def decide_action(req: DecisionRequest):
         relaxed_eps=log.get("relaxed_eps"),
         warning=log.get("warning"),
         infeasibility=log.get("infeasibility"),
+        infeasibility_class=log.get("infeasibility_class"),
+        alternatives=log.get("alternatives"),
     )
 
 

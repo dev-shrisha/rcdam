@@ -18,6 +18,10 @@ class DecisionRequest(BaseModel):
         "R1",
         description="Rule on INFEASIBLE: R1 (send-and-flag), R2 (defer), R3 (relax, explicitly reported), R4 (reject)"
     )
+    explain_alternatives: bool = Field(
+        False,
+        description="If infeasible, also compute best-achievable alternatives (min deadline / power / payload / eps). Slower."
+    )
     engine: Literal["window_conformal", "legacy"] = Field(
         "window_conformal",
         description="'window_conformal' = window-level conformal + trajectory evaluator (default); "
@@ -56,6 +60,8 @@ class DecisionResponse(BaseModel):
     relaxed_eps: Optional[float] = Field(None, description="Relaxed eps used by rule R3 (original NOT met)")
     warning: Optional[str] = Field(None, description="Explicit warning, e.g. requirement was relaxed")
     infeasibility: Optional[Dict[str, Any]] = Field(None, description="Structured explanation of WHY infeasible")
+    infeasibility_class: Optional[str] = Field(None, description="UNCERTAINTY_LIMITED or PHYSICALLY_INFEASIBLE")
+    alternatives: Optional[Dict[str, Any]] = Field(None, description="Best-achievable alternatives (when requested)")
 
 
 class ReportOutcomeRequest(BaseModel):

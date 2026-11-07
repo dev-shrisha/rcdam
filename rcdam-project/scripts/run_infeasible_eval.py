@@ -122,7 +122,13 @@ def evaluate_rules_on_seed(seed: int,
         for i, ctx in enumerate(contexts):
             dec = policy_v6_infeasible_rule(ctx, rule=rule)
             sim_rng = np.random.default_rng(seed * 10000 + i)
-            res = simulate_true_delivery(dec.action, ctx.arrival_idx, att, ctx.msg, table, sc, sim_rng)
+            # R4 (reject) returns no action: nothing is transmitted, the message is not delivered.
+            was_transmitted = dec.action is not None
+            if was_transmitted:
+                res = simulate_true_delivery(dec.action, ctx.arrival_idx, att, ctx.msg, table, sc, sim_rng)
+                delivered, message_overhead = bool(res.delivered), float(res.overhead)
+            else:
+                delivered, message_overhead = False, 0.0
 
             # A message is flagged infeasible if dec.feasible is False
             flagged = not dec.feasible
