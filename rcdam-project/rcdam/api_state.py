@@ -12,7 +12,7 @@ from .forecaster_baseline import EmpiricalQuantileForecaster
 from .calibration import load_calibration_json, fade_state
 from .variants import HORIZONS, ALPHAS
 from .window_conformal import WindowConformal
-from .engine import EngineParams
+from .engine import EngineParams, load_priority_params
 from .reliability import cp_lower
 
 
@@ -55,6 +55,15 @@ class ApiState:
 
         # Window-level conformal calibration (drives the default decision engine)
         self.engine_params = EngineParams()
+        # Per-class LTT-certified settings are OPT-IN: in our held-out test they under-delivered for the
+        # 'normal' class (4/272 false-feasible), because LTT assumes independent messages while fades
+        # cluster. Enable with RCDAM_USE_CERTIFIED_LAMBDA=1 only after re-certifying with event-level tests.
+        lam = os.path.join(out_dir, "v7_chosen_lambda.json")
+        if os.environ.get("RCDAM_USE_CERTIFIED_LAMBDA") == "1" and os.path.exists(lam):
+            try:
+                self.engine_params = load_priority_params(lam, self.engine_params)
+            except Exception:
+                pass
         self.wc = self._load_or_fit_wc(out_dir)
 
     def _load_or_fit_wc(self, out_dir: str) -> WindowConformal:

@@ -46,6 +46,28 @@ class EngineParams:
     max_eps_relaxed: float = 0.25
     hardware_power_cap_db: float = 6.0
     cp_conf: float = 0.95
+    exhaustive: bool = False                  # verification mode: no screening / pruning (slow)
+    classify_infeasible: bool = True          # separate uncertainty-limited from physically infeasible
+    by_priority: Dict[str, Dict[str, float]] = field(default_factory=dict)   # per-class burst_s / alpha_split
+
+
+def effective_params(p: EngineParams, priority: str) -> EngineParams:
+    """Apply per-priority (LTT-certified) burst_s / alpha_split overrides, if configured."""
+    from dataclasses import replace as _rep
+    ov = p.by_priority.get(str(priority)) if p.by_priority else None
+    if not ov:
+        return p
+    return _rep(p, burst_s=float(ov.get("burst_s", p.burst_s)), alpha_split=float(ov.get("alpha_split", p.alpha_split)))
+
+
+def load_priority_params(path: str, base: Optional[EngineParams] = None) -> EngineParams:
+    """Load outputs/v7_chosen_lambda.json (written by run_v7_full.py --stage sweep)."""
+    import json
+    from dataclasses import replace as _rep
+    with open(path) as f:
+        raw = json.load(f)
+    return _rep(base or EngineParams(), by_priority={k: dict(burst_s=v["burst_s"], alpha_split=v["alpha_split"])
+                                                    for k, v in raw.items()})
 
 
 def cost_breakdown(a: Action, msg, sc, table, p: EngineParams) -> Dict[str, float]:
@@ -67,10 +89,11 @@ def _cp_lower(p_hat: float, n: int, conf: float) -> float:
 
 
 def search(ctx, wc: WindowConformal, eps: float, p: EngineParams,
-           defers: Optional[Tuple[float, ...]] = None) -> Dict[str, Any]:
+           defers: Optional[Tuple[float, ...]] = None,
+           alpha_w_override: Optional[float] = None) -> Dict[str, Any]:
     msg, sc, table = ctx.msg, ctx.sc, ctx.table
     slope = float(ctx.features["slope5"][0]) if ctx.features and "slope5" in ctx.features else None
-    alpha_w = p.alpha_split * eps
+    alpha_w = alpha_w_override if alpha_w_override is not None else p.alpha_split * eps
     eps_d = max(1e-6, (1.0 - p.alpha_split) * eps)
     n_conf = int(np.clip(np.ceil(3.0 / eps_d), p.n_confirm_min, p.n_confirm_max))
     K = int(np.ceil(msg.size_bits / FRAME_BITS))
@@ -132,27 +155,29 @@ def search(ctx, wc: WindowConformal, eps: float, p: EngineParams,
                     dead.add((m, df))
 
     for idx, (cost, a) in enumerate(cands):
-        if not probed and n_eval >= 60:
-            probed = True
-            _probe_groups()
-        if (a.modcod, a.defer_s) in dead:
-            continue
-        if any(f[0] == a.modcod and f[1] == a.defer_s and f[2] == a.interleave_s and f[3] == a.dup
-               and a.power_db <= f[4] and a.parity_frac <= f[5] for f in failed):
-            continue
+        if not p.exhaustive:
+            if not probed and n_eval >= 60:
+                probed = True
+                _probe_groups()
+            if (a.modcod, a.defer_s) in dead:
+                continue
+            if any(f[0] == a.modcod and f[1] == a.defer_s and f[2] == a.interleave_s and f[3] == a.dup
+                   and a.power_db <= f[4] and a.parity_frac <= f[5] for f in failed):
+                continue
         pk = peak_for(a.defer_s)
         kw = _kw(a, pk)
         n_eval += 1
-        ps, _ = p_deliver_profile_detail(a, n_mc=p.n_screen, seed=(base_seed + idx) % 2**31, **kw)
-        if best is None or (ps, -cost) > (best[0], best[1]):
-            best = (ps, -cost, a, p.n_screen, pk)
-        if ps < 0.5:
-            failed.append((a.modcod, a.defer_s, a.interleave_s, a.dup, a.power_db, a.parity_frac))
-            continue
-        if ps < 1.0 - eps_d - 0.25:
-            continue
+        if not p.exhaustive:
+            ps, _ = p_deliver_profile_detail(a, n_mc=p.n_screen, seed=(base_seed + idx) % 2**31, **kw)
+            if best is None or (ps, -cost) > (best[0], best[1]):
+                best = (ps, -cost, a, p.n_screen, pk)
+            if ps < 0.5:
+                failed.append((a.modcod, a.defer_s, a.interleave_s, a.dup, a.power_db, a.parity_frac))
+                continue
+            if ps < 1.0 - eps_d - 0.25:
+                continue
         ph, n = p_deliver_profile_detail(a, n_mc=n_conf, seed=(base_seed + idx + 7) % 2**31, **kw)
-        if best[2] is a or (ph, -cost) > (best[0], best[1]):
+        if best is None or best[2] is a or (ph, -cost) > (best[0], best[1]):
             best = (ph, -cost, a, n, pk)
         if ph >= 1.0 - eps_d:
             return _pack(True, a, ph, n, pk, alpha_w, eps_d, eps, cost, len(cands), n_eval, p, msg, sc, table)
@@ -189,8 +214,9 @@ def _pack(feasible, a, p_hat, n, peak, alpha_w, eps_d, eps, cost, n_cand, n_eval
                 lb_meets_requirement=bool(lb >= 1.0 - eps))
 
 
-def decide(ctx, wc: WindowConformal, params: Optional[EngineParams] = None, rule: str = "R1") -> Decision:
-    p = params or EngineParams()
+def decide(ctx, wc: WindowConformal, params: Optional[EngineParams] = None, rule: str = "R1",
+           explain: bool = False) -> Decision:
+    p = effective_params(params or EngineParams(), ctx.msg.priority)
     msg, sc, table = ctx.msg, ctx.sc, ctx.table
     r = search(ctx, wc, msg.eps, p)
     log: Dict[str, Any] = dict(engine="window_conformal_v7", rule=rule, eps=msg.eps,
@@ -209,6 +235,17 @@ def decide(ctx, wc: WindowConformal, params: Optional[EngineParams] = None, rule
     diag = diagnose(msg, sc, table, r["peak_db"], max(p.powers), msg.eps, r["eps_d"], best,
                     p.hardware_power_cap_db)
     log["infeasibility"] = diag
+    if p.classify_infeasible:
+        # UNCERTAINTY_LIMITED: feasible if the window maximum is the MEDIAN one (alpha=0.5), infeasible
+        # only because the safety margin demanded by eps; PHYSICALLY_INFEASIBLE: infeasible even then.
+        r_nom = search(ctx, wc, msg.eps, p, alpha_w_override=0.5)
+        cls = "UNCERTAINTY_LIMITED" if r_nom["feasible"] else "PHYSICALLY_INFEASIBLE"
+        log.update(infeasibility_class=cls, nominal_feasible=bool(r_nom["feasible"]),
+                   nominal_predicted_p=r_nom["p_hat"])
+        diag["infeasibility_class"] = cls
+    if explain:
+        from .alternatives import best_alternatives
+        log["alternatives"] = best_alternatives(ctx, wc, p)
     reason = "deadline" if diag["primary_reason"] in ("DEADLINE_TOO_SHORT", "MESSAGE_TOO_LARGE") else "capacity"
 
     def _flag(res, outcome):
