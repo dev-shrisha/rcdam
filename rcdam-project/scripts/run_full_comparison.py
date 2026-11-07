@@ -72,7 +72,9 @@ def _globals():
 
 
 def _run_seed(seed):
-    path = os.path.join(OUT, f"full_eval_{A.channel}_seed{seed}.csv")
+    tag = (f"{A.channel}_h{A.hours:g}_i{A.interval:g}_m{A.min_att_db:g}_n{A.n_rep}"
+           f"_b{A.burst_s:g}_a{A.alpha_split:g}_r{A.rules.replace(',', '')}")
+    path = os.path.join(OUT, f"full_eval_{tag}_seed{seed}.csv")      # cache key includes ALL settings
     if os.path.exists(path) and not A.force:
         return pd.read_csv(path).to_dict("records")
     g = _globals(); table, wc = g["table"], g["wc"]
