@@ -1,0 +1,10 @@
+numpy
+scipy
+matplotlib
+pandas
+torch
+fastapi
+uvicorn
+pydantic>=2
+httpx
+pytest
