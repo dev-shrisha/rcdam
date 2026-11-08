@@ -16,3 +16,6 @@ outputs/forecaster*.pt
 .mypy_cache/
 *.swp
 *.swo
+
+.venv/
+venv/
